@@ -3,8 +3,9 @@ use std::{env, io, process::ExitCode};
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 use yap::{
-    agent::{Agent, AgentEvent},
+    agent::{Agent, AgentError, AgentEvent},
     app::App,
     approval::{ChannelApprovalBroker, Decision},
     model::OpenAiModel,
@@ -13,6 +14,11 @@ use yap::{
 
 const DEFAULT_MODEL: &str = "gpt-5.3-codex";
 const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
+
+struct TurnRequest {
+    prompt: String,
+    cancellation: CancellationToken,
+}
 
 #[tokio::main]
 async fn main() -> ExitCode {
@@ -39,7 +45,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     agent.register_tool(ApplyPatchTool::new(&workspace)?);
     agent.register_tool(RunCommandTool::new(&workspace)?);
 
-    let (prompt_tx, mut prompt_rx) = mpsc::channel::<String>(8);
+    let (prompt_tx, mut prompt_rx) = mpsc::channel::<TurnRequest>(8);
     let (event_tx, mut event_rx) = mpsc::channel::<AgentEvent>(128);
     let (approval_tx, mut approval_rx) = mpsc::channel(8);
     agent.set_event_sender(event_tx.clone());
@@ -47,11 +53,20 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
 
     let error_events = event_tx.clone();
     let agent_task = tokio::spawn(async move {
-        while let Some(prompt) = prompt_rx.recv().await {
-            if let Err(error) = agent.run_turn(prompt).await {
-                let _ = error_events
-                    .send(AgentEvent::TurnFailed(error.to_string()))
-                    .await;
+        while let Some(request) = prompt_rx.recv().await {
+            match agent
+                .run_turn_with_cancellation(request.prompt, request.cancellation)
+                .await
+            {
+                Ok(_) => {}
+                Err(AgentError::Cancelled) => {
+                    let _ = error_events.send(AgentEvent::TurnCancelled).await;
+                }
+                Err(error) => {
+                    let _ = error_events
+                        .send(AgentEvent::TurnFailed(error.to_string()))
+                        .await;
+                }
             }
         }
     });
@@ -93,12 +108,13 @@ async fn run_tui(
     terminal: &mut ratatui::DefaultTerminal,
     model: &str,
     workspace: &str,
-    prompt_tx: mpsc::Sender<String>,
+    prompt_tx: mpsc::Sender<TurnRequest>,
     event_rx: &mut mpsc::Receiver<AgentEvent>,
     approval_rx: &mut mpsc::Receiver<yap::approval::PendingApproval>,
 ) -> io::Result<()> {
     let mut app = App::new();
     let mut terminal_events = EventStream::new();
+    let mut active_cancellation: Option<CancellationToken> = None;
 
     loop {
         terminal.draw(|frame| yap::ui::render(frame, &app, model, workspace))?;
@@ -106,7 +122,7 @@ async fn run_tui(
             terminal_event = terminal_events.next() => {
                 match terminal_event {
                     Some(Ok(Event::Key(key))) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
-                        if !handle_key(&mut app, key, &prompt_tx).await {
+                        if !handle_key(&mut app, key, &prompt_tx, &mut active_cancellation).await {
                             return Ok(());
                         }
                     }
@@ -115,7 +131,17 @@ async fn run_tui(
                     None => return Ok(()),
                 }
             }
-            Some(event) = event_rx.recv() => app.reduce(event),
+            Some(event) = event_rx.recv() => {
+                if matches!(
+                    &event,
+                    AgentEvent::TurnFinished { .. }
+                        | AgentEvent::TurnCancelled
+                        | AgentEvent::TurnFailed(_)
+                ) {
+                    active_cancellation = None;
+                }
+                app.reduce(event);
+            }
             Some(approval) = approval_rx.recv() => app.receive_approval(approval),
         }
     }
@@ -124,7 +150,8 @@ async fn run_tui(
 async fn handle_key(
     app: &mut App,
     key: crossterm::event::KeyEvent,
-    prompt_tx: &mpsc::Sender<String>,
+    prompt_tx: &mpsc::Sender<TurnRequest>,
+    active_cancellation: &mut Option<CancellationToken>,
 ) -> bool {
     if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
         return false;
@@ -133,16 +160,32 @@ async fn handle_key(
     if app.has_pending_approval() {
         match key.code {
             KeyCode::Enter => app.decide(Decision::Allow),
-            KeyCode::Char('d') | KeyCode::Esc => app.decide(Decision::Deny),
+            KeyCode::Char('d') => app.decide(Decision::Deny),
+            KeyCode::Esc => cancel_active_turn(app, active_cancellation),
             _ => {}
         }
         return true;
     }
 
     match key.code {
-        KeyCode::Enter => {
+        KeyCode::Esc if app.status() == yap::app::Status::Working => {
+            cancel_active_turn(app, active_cancellation);
+        }
+        KeyCode::Enter
+            if matches!(
+                app.status(),
+                yap::app::Status::Ready | yap::app::Status::Failed
+            ) =>
+        {
             if let Some(prompt) = app.submit() {
-                let _ = prompt_tx.send(prompt).await;
+                let cancellation = CancellationToken::new();
+                *active_cancellation = Some(cancellation.clone());
+                let _ = prompt_tx
+                    .send(TurnRequest {
+                        prompt,
+                        cancellation,
+                    })
+                    .await;
             }
         }
         KeyCode::Backspace => app.pop_input(),
@@ -158,4 +201,11 @@ async fn handle_key(
         _ => {}
     }
     true
+}
+
+fn cancel_active_turn(app: &mut App, active_cancellation: &mut Option<CancellationToken>) {
+    app.cancel_active_turn();
+    if let Some(cancellation) = active_cancellation {
+        cancellation.cancel();
+    }
 }

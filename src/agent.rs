@@ -4,6 +4,7 @@ use futures_util::StreamExt;
 use serde_json::Value;
 use thiserror::Error;
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::{
     approval::{ApprovalBroker, ApprovalRequest, Decision, DenyAll, Risk},
@@ -48,9 +49,21 @@ where
     }
 
     pub async fn run_turn(&mut self, prompt: impl Into<String>) -> Result<TurnOutcome, AgentError> {
+        self.run_turn_with_cancellation(prompt, CancellationToken::new())
+            .await
+    }
+
+    pub async fn run_turn_with_cancellation(
+        &mut self,
+        prompt: impl Into<String>,
+        cancellation: CancellationToken,
+    ) -> Result<TurnOutcome, AgentError> {
         let mut input = vec![ModelInput::UserMessage(prompt.into())];
 
         for _ in 0..MAX_STEPS {
+            if cancellation.is_cancelled() {
+                return Err(AgentError::Cancelled);
+            }
             let mut tool_specs = self
                 .tools
                 .values()
@@ -58,13 +71,25 @@ where
                 .collect::<Vec<_>>();
             tool_specs.sort_by(|left, right| left.name.cmp(&right.name));
             let request = ModelRequest::from_input(self.model_name.clone(), input.clone())
-                .with_tools(tool_specs);
+                .with_tools(tool_specs)
+                .with_cancellation(cancellation.clone());
             let mut stream = self.model.stream(request);
             let mut assistant_text = String::new();
             let mut tool_calls: Vec<PendingToolCall> = Vec::new();
 
-            while let Some(event) = stream.next().await {
-                match event? {
+            loop {
+                let event = tokio::select! {
+                    _ = cancellation.cancelled() => return Err(AgentError::Cancelled),
+                    event = stream.next() => event,
+                };
+                let Some(event) = event else { break };
+                let event = match event {
+                    Err(ModelError::Cancelled) if cancellation.is_cancelled() => {
+                        return Err(AgentError::Cancelled);
+                    }
+                    event => event?,
+                };
+                match event {
                     ModelEvent::TextDelta(delta) => {
                         assistant_text.push_str(&delta);
                         self.emit(AgentEvent::AssistantDelta(delta)).await;
@@ -126,19 +151,26 @@ where
                     Risk::ReadOnly | Risk::WorkspaceWrite => Decision::Allow,
                     Risk::Mutating => {
                         let preview = tool.approval_preview(&arguments)?;
-                        self.approval_broker
-                            .decide(ApprovalRequest {
+                        tokio::select! {
+                            _ = cancellation.cancelled() => return Err(AgentError::Cancelled),
+                            decision = self.approval_broker.decide(ApprovalRequest {
                                 call_id: call.id.clone(),
                                 tool_name: call.name.clone(),
                                 arguments: arguments.clone(),
                                 risk,
                                 preview,
-                            })
-                            .await
+                            }) => decision,
+                        }
                     }
                 };
                 let (output, outcome) = match decision {
-                    Decision::Allow => (tool.execute(arguments).await?, ToolOutcome::Completed),
+                    Decision::Allow => {
+                        let output = tokio::select! {
+                            _ = cancellation.cancelled() => return Err(AgentError::Cancelled),
+                            output = tool.execute(arguments) => output?,
+                        };
+                        (output, ToolOutcome::Completed)
+                    }
                     Decision::Deny => (ToolOutput::new("denied by user"), ToolOutcome::Denied),
                 };
                 self.emit(AgentEvent::ToolFinished {
@@ -179,6 +211,7 @@ pub enum AgentEvent {
     TurnFinished {
         assistant_text: String,
     },
+    TurnCancelled,
     TurnFailed(String),
 }
 
@@ -186,6 +219,7 @@ pub enum AgentEvent {
 pub enum ToolOutcome {
     Completed,
     Denied,
+    Cancelled,
 }
 
 struct PendingToolCall {
@@ -201,6 +235,8 @@ pub struct TurnOutcome {
 
 #[derive(Debug, Error)]
 pub enum AgentError {
+    #[error("agent turn was cancelled")]
+    Cancelled,
     #[error(transparent)]
     Model(#[from] ModelError),
     #[error(transparent)]

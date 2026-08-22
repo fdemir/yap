@@ -14,7 +14,8 @@ Optional: `OPENAI_MODEL` and `OPENAI_BASE_URL`.
 ## Controls
 
 - `Enter`: submit or approve
-- `d` / `Esc`: deny
+- `Esc`: cancel the active turn
+- `d`: deny a pending command
 - `↑` / `↓`: scroll
 - `Ctrl+C`: exit
 

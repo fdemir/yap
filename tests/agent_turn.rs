@@ -1,8 +1,17 @@
 use futures_util::{StreamExt, stream};
+use tokio_util::sync::CancellationToken;
 use yap::{
     agent::{Agent, AgentEvent},
     model::{FinishReason, Model, ModelError, ModelEvent, ModelRequest, ModelStream},
 };
+
+struct PendingModel;
+
+impl Model for PendingModel {
+    fn stream(&self, _request: ModelRequest) -> ModelStream<'_> {
+        stream::pending().boxed()
+    }
+}
 
 struct ScriptedModel {
     events: Vec<Result<ModelEvent, ModelError>>,
@@ -35,6 +44,27 @@ async fn agent_turn_returns_the_completed_assistant_text() {
         .expect("turn should complete");
 
     assert_eq!(outcome.assistant_text, "Hello world");
+}
+
+#[tokio::test]
+async fn agent_turn_stops_when_cancelled() {
+    let cancellation = CancellationToken::new();
+    let task_cancellation = cancellation.clone();
+    let task = tokio::spawn(async move {
+        let mut agent = Agent::new(PendingModel, "gpt-5.3-codex");
+        agent
+            .run_turn_with_cancellation("Wait forever", task_cancellation)
+            .await
+    });
+
+    tokio::task::yield_now().await;
+    cancellation.cancel();
+
+    let result = tokio::time::timeout(std::time::Duration::from_secs(1), task)
+        .await
+        .expect("cancelled turn should stop promptly")
+        .expect("agent task should not panic");
+    assert!(matches!(result, Err(yap::agent::AgentError::Cancelled)));
 }
 
 #[tokio::test]

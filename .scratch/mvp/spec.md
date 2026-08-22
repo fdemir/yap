@@ -108,7 +108,7 @@ Completed:
 
 - OpenAI Responses streaming and normalized model events
 - Sequential model/tool loop with bounded steps
-- Fullscreen Ratatui transcript, composer, and approval flow
+- Fullscreen Ratatui transcript, composer, approval flow, and active-turn cancellation
 - Workspace-scoped `list_files` and `read_file`
 - Automatic workspace-scoped `apply_patch` with exact-match validation
 - Approval-gated `run_command` with timeout and bounded output
@@ -129,7 +129,8 @@ Known gaps:
 ### 1. Harden the vertical slice
 
 - [x] Add an end-to-end test using a fake provider
-- [ ] Expand malformed stream, cancellation, terminal restoration, and process cleanup tests
+- [x] Cancel active model streams, pending approvals, and running commands without exiting
+- [ ] Expand malformed stream, terminal restoration, and descendant-process cleanup tests
 - [ ] Move file access to capability-rooted operations and test filesystem races
 - [ ] Add redaction and explicit bounds for every retained buffer
 

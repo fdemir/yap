@@ -89,6 +89,7 @@ fn push_entry_lines(lines: &mut Vec<Line<'static>>, entry: &TranscriptEntry, wid
                 None => ("●", TOOL_PENDING_BG, Color::Yellow),
                 Some(ToolOutcome::Completed) => ("✓", TOOL_SUCCESS_BG, Color::Green),
                 Some(ToolOutcome::Denied) => ("×", TOOL_DENIED_BG, Color::Red),
+                Some(ToolOutcome::Cancelled) => ("×", TOOL_PENDING_BG, Color::Yellow),
             };
             let content = fit_background_line(&format!("{marker} {name}"), width);
             lines.push(Line::styled(

@@ -65,12 +65,28 @@ impl App {
                 self.commit_assistant_draft();
                 self.status = Status::Ready;
             }
+            AgentEvent::TurnCancelled => {
+                self.cancel_pending_approval();
+                self.commit_assistant_draft();
+                for entry in &mut self.transcript {
+                    if let TranscriptEntry::Tool { outcome, .. } = entry
+                        && outcome.is_none()
+                    {
+                        *outcome = Some(ToolOutcome::Cancelled);
+                    }
+                }
+                self.status = Status::Ready;
+            }
             AgentEvent::TurnFailed(message) => {
                 self.commit_assistant_draft();
                 self.transcript.push(TranscriptEntry::Error(message));
                 self.status = Status::Failed;
             }
         }
+    }
+
+    pub fn status(&self) -> Status {
+        self.status
     }
 
     pub fn has_pending_approval(&self) -> bool {
@@ -102,6 +118,17 @@ impl App {
         if let Some(approval) = self.pending_approval.take() {
             let _ = approval.respond_to.send(decision);
             self.status = Status::Working;
+        }
+    }
+
+    pub fn cancel_active_turn(&mut self) {
+        self.cancel_pending_approval();
+        self.status = Status::Working;
+    }
+
+    fn cancel_pending_approval(&mut self) {
+        if let Some(approval) = self.pending_approval.take() {
+            let _ = approval.respond_to.send(Decision::Deny);
         }
     }
 
