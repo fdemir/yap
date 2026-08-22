@@ -1,0 +1,110 @@
+# yap MVP
+
+Status: draft
+
+## Goal
+
+Build a small native coding agent in Rust with a fullscreen Ratatui interface. Use a minimal, event-driven design while supporting the smallest useful coding workflow: inspect a workspace, propose edits, run commands with approval, and continue the model/tool loop.
+
+## User flow
+
+1. The user launches `yap` in a repository.
+2. yap opens a transcript and prompt composer for the canonical current workspace.
+3. The user submits a coding task.
+4. Codex streams text and tool calls.
+5. Read-only file tools run automatically inside the workspace.
+6. File changes show a diff and wait for explicit approval.
+7. Shell commands show the exact command, working directory, timeout, and risk notice, then wait for explicit approval.
+8. Tool results return to Codex until it answers, is cancelled, or reaches a limit.
+
+## Provider
+
+- OpenAI Responses API
+- Model configurable; initial default: `gpt-5.3-codex`
+- Authentication: `OPENAI_API_KEY` environment variable
+- Optional endpoint override: `OPENAI_BASE_URL`
+- ChatGPT/Codex OAuth is out of scope for the MVP
+- Transport frames are normalized into provider-independent model events
+
+## MVP capabilities
+
+### Interface
+
+- Fullscreen Ratatui transcript
+- Single prompt composer
+- Streaming assistant text and tool status
+- Scrollback
+- Approval modal
+- Cancellation
+- Visible errors and step usage
+
+### Tools
+
+- `list_files`: bounded workspace listing
+- `read_file`: bounded workspace-relative reads
+- `apply_patch`: preview and approval before mutation
+- `run_command`: approval before execution, with timeout and output limits
+
+### Safety
+
+- One canonical workspace root
+- Relative file paths only; reject traversal and out-of-root access
+- Read-only tools may run automatically
+- Every write and shell command requires a typed UI decision tied to its tool-call ID
+- Model text and replayed session data never grant authority
+- Bound model steps, tool calls, file reads, command output, and retained transcript
+- Commands run with closed stdin and are killed on timeout or cancellation
+- Do not claim OS-level sandboxing
+
+## Modules and seams
+
+```text
+CLI/TUI -> Agent -> Model
+              |-> ToolRegistry -> Workspace / CommandRunner
+              |-> ApprovalBroker -> TUI
+```
+
+- `Agent::run_turn`: public behavior seam for the sequential model/tool loop
+- `Model::stream`: provider seam; implemented by OpenAI Responses and a scripted fake
+- `Tool::execute`: typed tool seam behind decode, validation, policy, and execution
+- `ApprovalBroker::decide`: human-authority seam; implemented by Ratatui and a scripted fake
+- Ratatui consumes `AgentEvent`; the agent never renders
+
+Persistence is deferred, so no `SessionStore` seam exists in the MVP.
+
+## Acceptance criteria
+
+### Protocol spike
+
+- A CLI call streams one Codex response through the OpenAI Responses API.
+- Fragmented SSE events are parsed correctly.
+- Provider errors, malformed events, cancellation, and incomplete streams produce typed failures.
+- Protocol behavior is testable with recorded fixtures and no live API call.
+
+### Vertical slice
+
+- A scripted fake model can drive: user prompt -> file read -> patch approval -> command approval -> final response.
+- Denied tools return a denial result to the model without performing the effect.
+- Unknown tools and invalid arguments never reach approval or execution.
+- Workspace traversal is rejected.
+- Limits and cancellation stop work predictably.
+- Terminal state is restored after normal exit, error, cancellation, or panic.
+
+## Non-goals
+
+- Multiple providers
+- ChatGPT OAuth
+- Sessions/resume
+- Parallel or background tools
+- MCP, skills, subagents, browser, vision, or web search
+- Additional workspaces
+- Automatic permission review or persistent approval rules
+- OS sandboxing
+- Full Markdown rendering or syntax highlighting
+
+## Delivery plan
+
+1. Protocol spike: model events, SSE adapter, fixtures, CLI-only streaming.
+2. Vertical slice: Ratatui loop, agent loop, four tools, approval, cancellation, and bounds.
+3. Hardening: capability-rooted filesystem access, protocol corpus, process cleanup, TUI tests, and redaction.
+4. Later: sessions, second provider, richer diffs, and sandbox evaluation.
