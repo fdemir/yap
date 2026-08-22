@@ -15,9 +15,6 @@ use crate::{
 const ACCENT: Color = Color::Cyan;
 const MUTED: Color = Color::DarkGray;
 const USER_BG: Color = Color::Indexed(236);
-const TOOL_PENDING_BG: Color = Color::Indexed(236);
-const TOOL_SUCCESS_BG: Color = Color::Indexed(22);
-const TOOL_DENIED_BG: Color = Color::Indexed(52);
 
 pub fn render(frame: &mut Frame<'_>, app: &App, model: &str, workspace: &str) {
     let editor_height = if app.pending_approval.is_some() { 8 } else { 3 };
@@ -25,39 +22,42 @@ pub fn render(frame: &mut Frame<'_>, app: &App, model: &str, workspace: &str) {
         .direction(Direction::Vertical)
         .constraints([
             Constraint::Min(4),
-            Constraint::Length(1),
             Constraint::Length(editor_height),
             Constraint::Length(2),
         ])
         .split(frame.area());
 
     render_transcript(frame, areas[0], app);
-    render_working_indicator(frame, areas[1], app.status);
     if app.pending_approval.is_some() {
-        render_approval(frame, areas[2], app);
+        render_approval(frame, areas[1], app);
     } else {
-        render_editor(frame, areas[2], app);
+        render_editor(frame, areas[1], app);
     }
-    render_footer(frame, areas[3], app, model, workspace);
+    render_footer(frame, areas[2], app, model, workspace);
 }
 
 fn render_transcript(frame: &mut Frame<'_>, area: Rect, app: &App) {
     let mut lines = Vec::new();
     for entry in &app.transcript {
-        if !lines.is_empty() {
-            lines.push(Line::raw(""));
-        }
+        push_message_gap(&mut lines);
         push_entry_lines(&mut lines, entry, area.width as usize);
     }
     if !app.assistant_draft.is_empty() {
-        if !lines.is_empty() {
-            lines.push(Line::raw(""));
-        }
+        push_message_gap(&mut lines);
         lines.extend(
             app.assistant_draft
                 .lines()
                 .map(|line| Line::raw(line.to_owned())),
         );
+    }
+    if let Some(status) = active_status(app.status) {
+        if app.assistant_draft.is_empty() {
+            push_message_gap(&mut lines);
+        }
+        lines.push(Line::styled(
+            format!("⠋ {status}"),
+            Style::default().fg(MUTED).add_modifier(Modifier::ITALIC),
+        ));
     }
 
     let visible_height = area.height as usize;
@@ -71,54 +71,52 @@ fn render_transcript(frame: &mut Frame<'_>, area: Rect, app: &App) {
     );
 }
 
+fn push_message_gap(lines: &mut Vec<Line<'static>>) {
+    if !lines.is_empty() {
+        lines.push(Line::raw(""));
+    }
+}
+
+fn active_status(status: Status) -> Option<&'static str> {
+    match status {
+        Status::Working => Some("Thinking..."),
+        Status::AwaitingApproval => Some("Waiting for approval..."),
+        Status::Ready | Status::Failed => None,
+    }
+}
+
 fn push_entry_lines(lines: &mut Vec<Line<'static>>, entry: &TranscriptEntry, width: usize) {
     match entry {
         TranscriptEntry::User(message) => {
+            let style = Style::default().bg(USER_BG);
+            lines.push(Line::styled(fit_background_line("", width), style));
             for line in message.lines() {
-                lines.push(Line::styled(
-                    fit_background_line(line, width),
-                    Style::default().bg(USER_BG),
-                ));
+                lines.push(Line::styled(fit_background_line(line, width), style));
             }
+            lines.push(Line::styled(fit_background_line("", width), style));
         }
         TranscriptEntry::Assistant(message) => {
             lines.extend(message.lines().map(|line| Line::raw(line.to_owned())));
         }
         TranscriptEntry::Tool { name, outcome, .. } => {
-            let (marker, background, foreground) = match outcome {
-                None => ("●", TOOL_PENDING_BG, Color::Yellow),
-                Some(ToolOutcome::Completed) => ("✓", TOOL_SUCCESS_BG, Color::Green),
-                Some(ToolOutcome::Denied) => ("×", TOOL_DENIED_BG, Color::Red),
-                Some(ToolOutcome::Cancelled) => ("×", TOOL_PENDING_BG, Color::Yellow),
+            let (marker, foreground) = match outcome {
+                None => ("●", Color::Yellow),
+                Some(ToolOutcome::Completed) => ("✓", Color::Green),
+                Some(ToolOutcome::Denied) => ("×", Color::Red),
+                Some(ToolOutcome::Cancelled) => ("×", Color::Yellow),
             };
-            let content = fit_background_line(&format!("{marker} {name}"), width);
             lines.push(Line::styled(
-                content,
-                Style::default()
-                    .fg(foreground)
-                    .bg(background)
-                    .add_modifier(Modifier::BOLD),
+                format!("{marker} {name}"),
+                Style::default().fg(foreground).add_modifier(Modifier::BOLD),
             ));
         }
         TranscriptEntry::Error(message) => {
             lines.push(Line::styled(
-                fit_background_line(&format!("Error: {message}"), width),
-                Style::default().fg(Color::Red).bg(TOOL_DENIED_BG),
+                format!("Error: {message}"),
+                Style::default().fg(Color::Red),
             ));
         }
     }
-}
-
-fn render_working_indicator(frame: &mut Frame<'_>, area: Rect, status: Status) {
-    let text = match status {
-        Status::Working => "Thinking...",
-        Status::AwaitingApproval => "Waiting for approval...",
-        Status::Ready | Status::Failed => "",
-    };
-    frame.render_widget(
-        Paragraph::new(text).style(Style::default().fg(MUTED).add_modifier(Modifier::ITALIC)),
-        area,
-    );
 }
 
 fn render_editor(frame: &mut Frame<'_>, area: Rect, app: &App) {
