@@ -18,6 +18,7 @@ pub struct ModelRequest {
     model: String,
     input: Vec<ModelInput>,
     tools: Vec<ToolSpec>,
+    system_prompt: Option<String>,
     cancellation: CancellationToken,
 }
 
@@ -31,6 +32,7 @@ impl ModelRequest {
             model: model.into(),
             input,
             tools: Vec::new(),
+            system_prompt: None,
             cancellation: CancellationToken::new(),
         }
     }
@@ -46,6 +48,15 @@ impl ModelRequest {
 
     pub fn tools(&self) -> &[ToolSpec] {
         &self.tools
+    }
+
+    pub fn with_system_prompt(mut self, system_prompt: impl Into<String>) -> Self {
+        self.system_prompt = Some(system_prompt.into());
+        self
+    }
+
+    pub fn system_prompt(&self) -> Option<&str> {
+        self.system_prompt.as_deref()
     }
 
     pub fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
@@ -197,16 +208,20 @@ impl Model for OpenAiModel {
                 .iter()
                 .map(ToolSpec::to_openai_json)
                 .collect::<Vec<_>>();
+            let mut body = json!({
+                "model": request.model,
+                "input": input,
+                "tools": tools,
+                "stream": true,
+            });
+            if let Some(system_prompt) = request.system_prompt {
+                body["instructions"] = Value::String(system_prompt);
+            }
             let send = self
                 .client
                 .post(&self.endpoint)
                 .bearer_auth(&self.api_key)
-                .json(&json!({
-                    "model": request.model,
-                    "input": input,
-                    "tools": tools,
-                    "stream": true,
-                }))
+                .json(&body)
                 .send();
             let response = tokio::select! {
                 _ = cancellation.cancelled() => Err(ModelError::Cancelled),

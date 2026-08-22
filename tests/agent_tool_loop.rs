@@ -15,6 +15,7 @@ use yap::{
         FinishReason, Model, ModelError, ModelEvent, ModelInput, ModelRequest, ModelStream,
         ToolSpec,
     },
+    system_prompt::SYSTEM_PROMPT,
     tool::{Tool, ToolError, ToolOutput},
     tools::ApplyPatchTool,
 };
@@ -137,8 +138,14 @@ async fn agent_executes_a_tool_and_continues_with_its_result() {
             outcome: ToolOutcome::Completed,
         })
     );
+    let requests = requests.lock().unwrap();
+    assert!(
+        requests
+            .iter()
+            .all(|request| request.system_prompt() == Some(SYSTEM_PROMPT))
+    );
     assert_eq!(
-        requests.lock().unwrap()[0].tools(),
+        requests[0].tools(),
         &[ToolSpec::new(
             "read_file",
             "Read a text file",
@@ -146,7 +153,7 @@ async fn agent_executes_a_tool_and_continues_with_its_result() {
         )]
     );
     assert_eq!(
-        requests.lock().unwrap()[1].input(),
+        requests[1].input(),
         &[
             ModelInput::UserMessage("Inspect main".into()),
             ModelInput::FunctionCall {

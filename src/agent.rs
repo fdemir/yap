@@ -9,6 +9,7 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     approval::{ApprovalBroker, ApprovalRequest, Decision, DenyAll, Risk},
     model::{Model, ModelError, ModelEvent, ModelInput, ModelRequest},
+    system_prompt::SYSTEM_PROMPT,
     tool::{Tool, ToolError, ToolOutput},
 };
 
@@ -72,6 +73,7 @@ where
             tool_specs.sort_by(|left, right| left.name.cmp(&right.name));
             let request = ModelRequest::from_input(self.model_name.clone(), input.clone())
                 .with_tools(tool_specs)
+                .with_system_prompt(SYSTEM_PROMPT)
                 .with_cancellation(cancellation.clone());
             let mut stream = self.model.stream(request);
             let mut assistant_text = String::new();

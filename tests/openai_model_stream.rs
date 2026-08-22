@@ -39,6 +39,32 @@ async fn model_stream_normalizes_fragmented_openai_sse_events() {
 }
 
 #[tokio::test]
+async fn model_stream_sends_system_prompt_as_openai_instructions() {
+    let (endpoint, captured_request) = serve_sse_and_capture_request().await;
+    let model = OpenAiModel::new(endpoint, "test-key");
+
+    let events = model
+        .stream(ModelRequest::new("gpt-5.3-codex", "Say hello").with_system_prompt("You are Yap."))
+        .collect::<Vec<_>>()
+        .await;
+
+    assert!(events.iter().all(Result::is_ok));
+    let request = captured_request
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("request should be captured");
+    let body: serde_json::Value = serde_json::from_str(
+        request
+            .split_once("\r\n\r\n")
+            .expect("request should contain a body")
+            .1,
+    )
+    .expect("request body should be JSON");
+    assert_eq!(body["instructions"], "You are Yap.");
+}
+
+#[tokio::test]
 async fn model_stream_sends_function_tool_definitions() {
     let (endpoint, captured_request) = serve_sse_and_capture_request().await;
     let model = OpenAiModel::new(endpoint, "test-key");
