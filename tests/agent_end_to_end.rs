@@ -84,11 +84,7 @@ async fn fake_provider_drives_read_edit_command_and_final_response() {
 
     assert_eq!(outcome.assistant_text, "Done.");
     assert_eq!(fs::read_to_string(file).unwrap(), "new\n");
-    assert_eq!(approval_requests.lock().unwrap().len(), 1);
-    assert_eq!(
-        approval_requests.lock().unwrap()[0].tool_name,
-        "run_command"
-    );
+    assert!(approval_requests.lock().unwrap().is_empty());
 
     let requests = model_requests.lock().unwrap();
     assert_eq!(requests.len(), 4);

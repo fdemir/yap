@@ -1,7 +1,7 @@
 use std::{
     fs::{self, File},
     io::{self, Read},
-    path::PathBuf,
+    path::{Path, PathBuf},
 };
 
 use async_trait::async_trait;
@@ -55,8 +55,19 @@ impl Tool for ReadFileTool {
         )
     }
 
-    fn risk(&self, _arguments: &Value) -> Risk {
-        Risk::ReadOnly
+    fn risk(&self, arguments: &Value) -> Risk {
+        let sensitive = arguments
+            .get("path")
+            .and_then(Value::as_str)
+            .map(Path::new)
+            .is_some_and(|path| {
+                is_sensitive_env_path(path) && resolve_existing(&self.root, path).is_ok()
+            });
+        if sensitive {
+            Risk::SensitiveRead
+        } else {
+            Risk::ReadOnly
+        }
     }
 
     async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
@@ -81,4 +92,11 @@ impl Tool for ReadFileTool {
         }
         Ok(ToolOutput::new(contents))
     }
+}
+
+fn is_sensitive_env_path(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    name != ".env.example" && (name.ends_with(".env") || name.contains(".env."))
 }

@@ -6,6 +6,7 @@ use std::{
 use crate::tool::ToolError;
 
 mod apply_patch;
+mod command_policy;
 mod list_files;
 mod read_file;
 mod run_command;

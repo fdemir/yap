@@ -4,7 +4,7 @@ Status: first vertical slice implemented; hardening next
 
 ## Goal
 
-Build a small native coding agent in Rust with a fullscreen Ratatui interface. Use a minimal, event-driven design while supporting the smallest useful coding workflow: inspect a workspace, propose edits, run commands with approval, and continue the model/tool loop.
+Build a small native coding agent in Rust with a fullscreen Ratatui interface. Use a minimal, event-driven design while supporting the smallest useful coding workflow: inspect a workspace, apply edits, run commands with contextual approval, and continue the model/tool loop.
 
 ## User flow
 
@@ -12,10 +12,11 @@ Build a small native coding agent in Rust with a fullscreen Ratatui interface. U
 2. yap opens a transcript and prompt composer for the canonical current workspace.
 3. The user submits a coding task.
 4. Codex streams text and tool calls.
-5. Read-only file tools run automatically inside the workspace.
+5. Read-only file tools run automatically inside the workspace, except sensitive `.env` reads.
 6. Exact-match file changes are applied automatically inside the workspace.
-7. Shell commands show the exact command, working directory, timeout, and risk notice, then wait for explicit approval.
-8. Tool results return to Codex until it answers, is cancelled, or reaches a limit.
+7. Shell commands run automatically when their detected paths remain inside the workspace; external access waits for explicit approval.
+8. A third consecutive tool call with the same arguments waits for explicit approval.
+9. Tool results return to Codex until it answers, is cancelled, or reaches a limit.
 
 ## Provider
 
@@ -43,14 +44,16 @@ Build a small native coding agent in Rust with a fullscreen Ratatui interface. U
 - `list_files`: bounded workspace listing
 - `read_file`: bounded workspace-relative reads
 - `apply_patch`: automatic exact-match replacement inside the workspace
-- `run_command`: approval before execution, with timeout and output limits
+- `run_command`: automatic workspace execution with external-path approval, timeout, and output limits
 
 ### Safety
 
 - One canonical workspace root
 - Relative file paths only; reject traversal and out-of-root access
-- Read-only tools may run automatically
-- Shell commands require a typed UI decision tied to their tool-call ID
+- Read-only tools run automatically except sensitive `.env` reads
+- Workspace edits and ordinary workspace commands run automatically
+- Sensitive reads, detected external command paths, and repeated tool calls require a typed UI decision tied to their tool-call ID
+- Direct file-tool traversal and out-of-root access remain blocked
 - Model text and replayed session data never grant authority
 - Bound model steps, tool calls, file reads, command output, and retained transcript
 - Commands run with closed stdin and are killed on timeout or cancellation
@@ -83,7 +86,7 @@ Persistence is deferred, so no `SessionStore` seam exists in the MVP.
 
 ### Vertical slice
 
-- A scripted fake model can drive: user prompt -> file read -> automatic patch -> command approval -> final response.
+- A scripted fake model can drive: user prompt -> file read -> automatic patch -> automatic workspace command -> final response.
 - Denied tools return a denial result to the model without performing the effect.
 - Unknown tools and invalid arguments never reach approval or execution.
 - Workspace traversal is rejected.
@@ -98,7 +101,7 @@ Persistence is deferred, so no `SessionStore` seam exists in the MVP.
 - Parallel or background tools
 - MCP, skills, subagents, browser, vision, or web search
 - Additional workspaces
-- Automatic permission review or persistent approval rules
+- Configurable or persistent approval rules
 - OS sandboxing
 - Full Markdown rendering or syntax highlighting
 
@@ -111,9 +114,10 @@ Completed:
 - Fullscreen Ratatui transcript, composer, approval flow, and active-turn cancellation
 - Workspace-scoped `list_files` and `read_file`
 - Automatic workspace-scoped `apply_patch` with exact-match validation
-- Approval-gated `run_command` with timeout and bounded output
+- Automatic workspace `run_command` with external-path approval, timeout, and bounded output
+- Approval for sensitive `.env` reads and repeated identical tool calls
 - Integration tests for provider streaming, agent behavior, tools, and workspace escapes
-- End-to-end fake-provider flow covering read -> automatic edit -> approved command -> final response
+- End-to-end fake-provider flow covering read -> automatic edit -> automatic command -> final response
 
 Known gaps:
 
@@ -122,7 +126,7 @@ Known gaps:
 - No multiline composer or rich Markdown/diff rendering
 - Cancellation and descendant-process cleanup need more adversarial testing
 - Filesystem checks are canonical-path based, not capability based
-- No OS sandbox
+- No OS sandbox; shell external-path detection is best effort
 
 ## Roadmap
 

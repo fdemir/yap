@@ -15,11 +15,11 @@ Optional: `OPENAI_MODEL` and `OPENAI_BASE_URL`.
 
 - `Enter`: submit or approve
 - `Esc`: cancel the active turn
-- `d`: deny a pending command
+- `d`: deny a pending approval
 - `↑` / `↓`: scroll
 - `Ctrl+C`: exit
 
-> Approved shell commands run with your user permissions. There is no OS sandbox.
+> Shell commands run with your user permissions, and most workspace commands do not require approval. There is no OS sandbox.
 
 ## Development
 

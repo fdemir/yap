@@ -6,7 +6,16 @@ use tokio::sync::{mpsc, oneshot};
 pub enum Risk {
     ReadOnly,
     WorkspaceWrite,
+    SensitiveRead,
+    ExternalAccess,
+    RepeatedCall,
     Mutating,
+}
+
+impl Risk {
+    pub fn requires_approval(self) -> bool {
+        !matches!(self, Self::ReadOnly | Self::WorkspaceWrite)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

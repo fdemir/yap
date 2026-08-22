@@ -17,7 +17,7 @@ async fn run_command_executes_in_the_workspace_and_captures_output() {
         "command": "printf 'hello'; printf 'warn' >&2"
     });
 
-    assert_eq!(tool.risk(&arguments), Risk::Mutating);
+    assert_eq!(tool.risk(&arguments), Risk::WorkspaceWrite);
     let output = tool
         .execute(arguments)
         .await
@@ -26,6 +26,68 @@ async fn run_command_executes_in_the_workspace_and_captures_output() {
     assert_eq!(
         output.into_model_text(),
         "exit code: 0\nstdout:\nhello\nstderr:\nwarn"
+    );
+}
+
+#[test]
+fn run_command_requests_approval_for_external_paths() {
+    let root = tempdir().expect("root should be created");
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace should be created");
+    let tool = RunCommandTool::new(&workspace).expect("workspace should be valid");
+
+    let external = root.path().join("secret.txt");
+    std::fs::write(&external, "secret").expect("external file should be created");
+
+    assert_eq!(
+        tool.risk(&json!({"command": "cat ../secret.txt"})),
+        Risk::ExternalAccess
+    );
+    assert_eq!(
+        tool.risk(&json!({"command": "echo $(cat ../secret.txt)"})),
+        Risk::ExternalAccess
+    );
+    assert_eq!(
+        tool.risk(&json!({"command": "cat ${HOME}/.config/example"})),
+        Risk::ExternalAccess
+    );
+    assert_eq!(
+        tool.risk(&json!({"command": "cat $PWD/src/main.rs"})),
+        Risk::WorkspaceWrite
+    );
+    assert_eq!(
+        tool.risk(&json!({"command": format!("cat '{}'", external.display())})),
+        Risk::ExternalAccess
+    );
+    assert_eq!(
+        tool.risk(&json!({"command": "cargo test && rm target/stale"})),
+        Risk::WorkspaceWrite
+    );
+    assert_eq!(
+        tool.risk(&json!({"command": "curl https://example.com"})),
+        Risk::WorkspaceWrite
+    );
+    assert_eq!(
+        tool.risk(&json!({"command": format!("echo '{}'", external.display())})),
+        Risk::WorkspaceWrite
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn run_command_requests_approval_for_a_workspace_symlink_to_an_external_file() {
+    let root = tempdir().expect("root should be created");
+    let workspace = root.path().join("workspace");
+    std::fs::create_dir(&workspace).expect("workspace should be created");
+    let external = root.path().join("secret.txt");
+    std::fs::write(&external, "secret").expect("external file should be created");
+    std::os::unix::fs::symlink(&external, workspace.join("secret-link"))
+        .expect("symlink should be created");
+    let tool = RunCommandTool::new(&workspace).expect("workspace should be valid");
+
+    assert_eq!(
+        tool.risk(&json!({"command": "cat secret-link"})),
+        Risk::ExternalAccess
     );
 }
 

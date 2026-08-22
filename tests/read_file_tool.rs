@@ -3,6 +3,7 @@ use std::fs;
 use serde_json::json;
 use tempfile::tempdir;
 use yap::{
+    approval::Risk,
     tool::{Tool, ToolError},
     tools::ReadFileTool,
 };
@@ -27,6 +28,23 @@ async fn read_file_returns_workspace_file_contents() {
         output.into_model_text(),
         "fn main() {\n    println!(\"hello\");\n}\n"
     );
+}
+
+#[test]
+fn read_file_requests_approval_for_dotenv_files() {
+    let workspace = tempdir().expect("workspace should be created");
+    fs::create_dir(workspace.path().join("config")).expect("directory should be created");
+    fs::write(workspace.path().join(".env"), "SECRET=value").expect("file should be created");
+    fs::write(workspace.path().join("config/.env.local"), "SECRET=value")
+        .expect("file should be created");
+    let tool = ReadFileTool::new(workspace.path()).expect("workspace should be valid");
+
+    assert_eq!(tool.risk(&json!({"path": ".env"})), Risk::SensitiveRead);
+    assert_eq!(
+        tool.risk(&json!({"path": "config/.env.local"})),
+        Risk::SensitiveRead
+    );
+    assert_eq!(tool.risk(&json!({"path": ".env.example"})), Risk::ReadOnly);
 }
 
 #[tokio::test]

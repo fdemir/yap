@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use futures_util::StreamExt;
 use serde_json::Value;
@@ -14,6 +14,7 @@ use crate::{
 };
 
 const MAX_STEPS: usize = 12;
+const DOOM_LOOP_THRESHOLD: usize = 3;
 
 pub struct Agent<M> {
     model: M,
@@ -60,6 +61,7 @@ where
         cancellation: CancellationToken,
     ) -> Result<TurnOutcome, AgentError> {
         let mut input = vec![ModelInput::UserMessage(prompt.into())];
+        let mut recent_tool_calls = VecDeque::with_capacity(DOOM_LOOP_THRESHOLD - 1);
 
         for _ in 0..MAX_STEPS {
             if cancellation.is_cancelled() {
@@ -148,22 +150,43 @@ where
                     .tools
                     .get(&call.name)
                     .ok_or_else(|| AgentError::UnknownTool(call.name.clone()))?;
-                let risk = tool.risk(&arguments);
-                let decision = match risk {
-                    Risk::ReadOnly | Risk::WorkspaceWrite => Decision::Allow,
-                    Risk::Mutating => {
-                        let preview = tool.approval_preview(&arguments)?;
-                        tokio::select! {
-                            _ = cancellation.cancelled() => return Err(AgentError::Cancelled),
-                            decision = self.approval_broker.decide(ApprovalRequest {
-                                call_id: call.id.clone(),
-                                tool_name: call.name.clone(),
-                                arguments: arguments.clone(),
-                                risk,
-                                preview,
-                            }) => decision,
-                        }
+                let repeated = recent_tool_calls.len() == DOOM_LOOP_THRESHOLD - 1
+                    && recent_tool_calls
+                        .iter()
+                        .all(|(name, previous)| name == &call.name && previous == &arguments);
+                if recent_tool_calls.len() == DOOM_LOOP_THRESHOLD - 1 {
+                    recent_tool_calls.pop_front();
+                }
+                recent_tool_calls.push_back((call.name.clone(), arguments.clone()));
+
+                let risk = if repeated {
+                    Risk::RepeatedCall
+                } else {
+                    tool.risk(&arguments)
+                };
+                let decision = if risk.requires_approval() {
+                    let mut preview = tool.approval_preview(&arguments)?;
+                    if risk == Risk::RepeatedCall {
+                        let details = preview.take().unwrap_or_else(|| {
+                            serde_json::to_string_pretty(&arguments)
+                                .unwrap_or_else(|_| "unable to display arguments".into())
+                        });
+                        preview = Some(format!(
+                            "same tool call repeated {DOOM_LOOP_THRESHOLD} times\n\n{details}"
+                        ));
                     }
+                    tokio::select! {
+                        _ = cancellation.cancelled() => return Err(AgentError::Cancelled),
+                        decision = self.approval_broker.decide(ApprovalRequest {
+                            call_id: call.id.clone(),
+                            tool_name: call.name.clone(),
+                            arguments: arguments.clone(),
+                            risk,
+                            preview,
+                        }) => decision,
+                    }
+                } else {
+                    Decision::Allow
                 };
                 let (output, outcome) = match decision {
                     Decision::Allow => {

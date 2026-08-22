@@ -17,7 +17,7 @@ use yap::{
     },
     system_prompt::SYSTEM_PROMPT,
     tool::{Tool, ToolError, ToolOutput},
-    tools::ApplyPatchTool,
+    tools::{ApplyPatchTool, RunCommandTool},
 };
 
 struct ScriptedModel {
@@ -166,6 +166,117 @@ async fn agent_executes_a_tool_and_continues_with_its_result() {
                 output: "fn main() {}".into(),
             },
         ]
+    );
+}
+
+#[tokio::test]
+async fn agent_requests_approval_on_the_third_identical_tool_call() {
+    let model_requests = Arc::new(Mutex::new(Vec::new()));
+    let model = ScriptedModel {
+        responses: Mutex::new(VecDeque::from([
+            read_call("call_1"),
+            read_call("call_2"),
+            read_call("call_3"),
+            vec![
+                Ok(ModelEvent::TextDelta("Stopped repeating.".into())),
+                Ok(ModelEvent::Finished(FinishReason::Completed)),
+            ],
+        ])),
+        requests: model_requests.clone(),
+    };
+    let approval_requests = Arc::new(Mutex::new(Vec::new()));
+    let tool_calls = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = Agent::new(model, "gpt-5.3-codex");
+    agent.set_approval_broker(DenyingApproval {
+        requests: approval_requests.clone(),
+    });
+    agent.register_tool(RecordingTool {
+        calls: tool_calls.clone(),
+    });
+
+    let outcome = agent
+        .run_turn("Keep inspecting main")
+        .await
+        .expect("denied repetition should return to the model");
+
+    assert_eq!(outcome.assistant_text, "Stopped repeating.");
+    assert_eq!(tool_calls.lock().unwrap().len(), 2);
+    let approvals = approval_requests.lock().unwrap();
+    assert_eq!(approvals.len(), 1);
+    assert_eq!(approvals[0].risk, Risk::RepeatedCall);
+    assert_eq!(
+        model_requests.lock().unwrap()[3].input().last(),
+        Some(&ModelInput::FunctionCallOutput {
+            id: "call_3".into(),
+            output: "denied by user".into(),
+        })
+    );
+}
+
+fn read_call(id: &str) -> Vec<Result<ModelEvent, ModelError>> {
+    vec![
+        Ok(ModelEvent::ToolCallStarted {
+            id: id.into(),
+            name: "read_file".into(),
+        }),
+        Ok(ModelEvent::ToolArgumentsDelta {
+            id: id.into(),
+            delta: "{\"path\":\"src/main.rs\"}".into(),
+        }),
+        Ok(ModelEvent::Finished(FinishReason::Completed)),
+    ]
+}
+
+#[tokio::test]
+async fn agent_requests_approval_before_a_command_accesses_an_external_path() {
+    let root = tempdir().expect("root should be created");
+    let workspace = root.path().join("workspace");
+    fs::create_dir(&workspace).expect("workspace should be created");
+    let model_requests = Arc::new(Mutex::new(Vec::new()));
+    let model = ScriptedModel {
+        responses: Mutex::new(VecDeque::from([
+            vec![
+                Ok(ModelEvent::ToolCallStarted {
+                    id: "command_1".into(),
+                    name: "run_command".into(),
+                }),
+                Ok(ModelEvent::ToolArgumentsDelta {
+                    id: "command_1".into(),
+                    delta: "{\"command\":\"touch ../outside\"}".into(),
+                }),
+                Ok(ModelEvent::Finished(FinishReason::Completed)),
+            ],
+            vec![
+                Ok(ModelEvent::TextDelta("External command denied.".into())),
+                Ok(ModelEvent::Finished(FinishReason::Completed)),
+            ],
+        ])),
+        requests: model_requests.clone(),
+    };
+    let approval_requests = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = Agent::new(model, "gpt-5.3-codex");
+    agent.set_approval_broker(DenyingApproval {
+        requests: approval_requests.clone(),
+    });
+    agent.register_tool(RunCommandTool::new(&workspace).expect("workspace should be valid"));
+
+    let outcome = agent
+        .run_turn("Touch a file outside the workspace")
+        .await
+        .expect("denial should return to the model");
+
+    assert_eq!(outcome.assistant_text, "External command denied.");
+    assert!(!root.path().join("outside").exists());
+    assert_eq!(
+        approval_requests.lock().unwrap()[0].risk,
+        Risk::ExternalAccess
+    );
+    assert_eq!(
+        model_requests.lock().unwrap()[1].input().last(),
+        Some(&ModelInput::FunctionCallOutput {
+            id: "command_1".into(),
+            output: "denied by user".into(),
+        })
     );
 }
 

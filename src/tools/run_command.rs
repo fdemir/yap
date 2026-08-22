@@ -12,6 +12,7 @@ use crate::{
     approval::Risk,
     model::ToolSpec,
     tool::{Tool, ToolError, ToolOutput},
+    tools::command_policy,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
@@ -55,7 +56,7 @@ impl Tool for RunCommandTool {
     fn spec(&self) -> ToolSpec {
         ToolSpec::new(
             "run_command",
-            "Run a shell command in the workspace after user approval",
+            "Run a shell command in the workspace",
             json!({
                 "type": "object",
                 "properties": {"command": {"type": "string"}},
@@ -65,8 +66,16 @@ impl Tool for RunCommandTool {
         )
     }
 
-    fn risk(&self, _arguments: &Value) -> Risk {
-        Risk::Mutating
+    fn risk(&self, arguments: &Value) -> Risk {
+        let external = arguments
+            .get("command")
+            .and_then(Value::as_str)
+            .is_some_and(|command| command_policy::accesses_outside(&self.root, command));
+        if external {
+            Risk::ExternalAccess
+        } else {
+            Risk::WorkspaceWrite
+        }
     }
 
     fn approval_preview(&self, arguments: &Value) -> Result<Option<String>, ToolError> {

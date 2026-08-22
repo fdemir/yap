@@ -17,6 +17,7 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "str
 ratatui = "0.30"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+shell-words = "1.1"
 thiserror = "2"
 tokio-util = { version = "0.7", features = ["rt"] }
 unicode-width = "0.2"
