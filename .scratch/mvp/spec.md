@@ -1,6 +1,6 @@
 # yap MVP
 
-Status: draft
+Status: first vertical slice implemented; hardening next
 
 ## Goal
 
@@ -102,9 +102,61 @@ Persistence is deferred, so no `SessionStore` seam exists in the MVP.
 - OS sandboxing
 - Full Markdown rendering or syntax highlighting
 
-## Delivery plan
+## Current state
 
-1. Protocol spike: model events, SSE adapter, fixtures, CLI-only streaming.
-2. Vertical slice: Ratatui loop, agent loop, four tools, approval, cancellation, and bounds.
-3. Hardening: capability-rooted filesystem access, protocol corpus, process cleanup, TUI tests, and redaction.
-4. Later: sessions, second provider, richer diffs, and sandbox evaluation.
+Completed:
+
+- OpenAI Responses streaming and normalized model events
+- Sequential model/tool loop with bounded steps
+- Fullscreen Ratatui transcript, composer, and approval flow
+- Workspace-scoped `list_files` and `read_file`
+- Approval-gated `apply_patch` with a diff preview
+- Approval-gated `run_command` with timeout and bounded output
+- Integration tests for provider streaming, agent behavior, tools, and workspace escapes
+
+Known gaps:
+
+- No CI pipeline
+- No session persistence or resume
+- No multiline composer or rich Markdown/diff rendering
+- Cancellation and descendant-process cleanup need more adversarial testing
+- Filesystem checks are canonical-path based, not capability based
+- No OS sandbox
+
+## Roadmap
+
+### 1. Harden the vertical slice
+
+- Add GitHub Actions for formatting, tests, and Clippy
+- Add an end-to-end test using a fake provider
+- Expand malformed stream, cancellation, terminal restoration, and process cleanup tests
+- Move file access to capability-rooted operations and test filesystem races
+- Add redaction and explicit bounds for every retained buffer
+
+### 2. Improve daily usability
+
+- Add multiline editing and better transcript navigation
+- Improve Markdown, diff, and tool-output rendering
+- Add Git status and diff context
+- Surface model, step, token, and error details clearly
+
+### 3. Add persistence and configuration
+
+- Store semantic session events as private JSONL
+- Resume sessions by validated ID and workspace
+- Add validated global and per-project configuration
+- Keep credentials environment-only
+
+### 4. Add extensibility
+
+- Add a second provider to validate the model seam
+- Support custom tools and configurable prompts
+- Evaluate skills and MCP after the core remains reliable
+
+### 5. Prepare releases
+
+- Publish versioned, prebuilt binaries and an installer
+- Add a changelog, security policy, and contribution guide
+- Document platform support and sandbox guarantees precisely
+
+The immediate priority is Stage 1. New feature breadth waits until the current vertical slice is reliable.

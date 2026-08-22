@@ -56,11 +56,12 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     });
 
+    let workspace_label = workspace_label(&workspace);
     let mut terminal = ratatui::init();
     let result = run_tui(
         &mut terminal,
         &model_name,
-        &workspace.display().to_string(),
+        &workspace_label,
         prompt_tx,
         &mut event_rx,
         &mut approval_rx,
@@ -70,6 +71,22 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     agent_task.abort();
     result?;
     Ok(())
+}
+
+fn workspace_label(workspace: &std::path::Path) -> String {
+    let branch = std::process::Command::new("git")
+        .args(["branch", "--show-current"])
+        .current_dir(workspace)
+        .output()
+        .ok()
+        .filter(|output| output.status.success())
+        .and_then(|output| String::from_utf8(output.stdout).ok())
+        .map(|branch| branch.trim().to_owned())
+        .filter(|branch| !branch.is_empty());
+    match branch {
+        Some(branch) => format!("{} ({branch})", workspace.display()),
+        None => workspace.display().to_string(),
+    }
 }
 
 async fn run_tui(

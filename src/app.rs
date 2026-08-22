@@ -4,7 +4,7 @@ use crate::{
 };
 
 pub struct App {
-    pub(crate) transcript: Vec<String>,
+    pub(crate) transcript: Vec<TranscriptEntry>,
     pub(crate) assistant_draft: String,
     pub(crate) composer: String,
     pub(crate) pending_approval: Option<PendingApproval>,
@@ -29,7 +29,7 @@ impl App {
         if prompt.is_empty() {
             return None;
         }
-        self.transcript.push(format!("You\n{prompt}"));
+        self.transcript.push(TranscriptEntry::User(prompt.clone()));
         self.composer.clear();
         self.status = Status::Working;
         Some(prompt)
@@ -38,16 +38,28 @@ impl App {
     pub fn reduce(&mut self, event: AgentEvent) {
         match event {
             AgentEvent::AssistantDelta(delta) => self.assistant_draft.push_str(&delta),
-            AgentEvent::ToolStarted { name, .. } => {
+            AgentEvent::ToolStarted { id, name } => {
                 self.commit_assistant_draft();
-                self.transcript.push(format!("● {name}"));
+                self.transcript.push(TranscriptEntry::Tool {
+                    id,
+                    name,
+                    outcome: None,
+                });
             }
-            AgentEvent::ToolFinished { name, outcome, .. } => {
-                let marker = match outcome {
-                    ToolOutcome::Completed => "✓",
-                    ToolOutcome::Denied => "×",
-                };
-                self.transcript.push(format!("{marker} {name}"));
+            AgentEvent::ToolFinished {
+                id,
+                name,
+                outcome,
+            } => {
+                if let Some(entry) = self.transcript.iter_mut().rev().find(|entry| {
+                    matches!(entry, TranscriptEntry::Tool { id: entry_id, .. } if entry_id == &id)
+                }) {
+                    *entry = TranscriptEntry::Tool {
+                        id,
+                        name,
+                        outcome: Some(outcome),
+                    };
+                }
             }
             AgentEvent::TurnFinished { .. } => {
                 self.commit_assistant_draft();
@@ -55,7 +67,7 @@ impl App {
             }
             AgentEvent::TurnFailed(message) => {
                 self.commit_assistant_draft();
-                self.transcript.push(format!("Error\n{message}"));
+                self.transcript.push(TranscriptEntry::Error(message));
                 self.status = Status::Failed;
             }
         }
@@ -74,11 +86,11 @@ impl App {
     }
 
     pub fn scroll_up(&mut self) {
-        self.scroll = self.scroll.saturating_sub(1);
+        self.scroll = self.scroll.saturating_add(1);
     }
 
     pub fn scroll_down(&mut self) {
-        self.scroll = self.scroll.saturating_add(1);
+        self.scroll = self.scroll.saturating_sub(1);
     }
 
     pub fn receive_approval(&mut self, approval: PendingApproval) {
@@ -93,19 +105,12 @@ impl App {
         }
     }
 
-    pub(crate) fn transcript_text(&self) -> String {
-        let mut sections = self.transcript.clone();
-        if !self.assistant_draft.is_empty() {
-            sections.push(format!("Assistant\n{}", self.assistant_draft));
-        }
-        sections.join("\n\n")
-    }
-
     fn commit_assistant_draft(&mut self) {
         if !self.assistant_draft.is_empty() {
             self.transcript
-                .push(format!("Assistant\n{}", self.assistant_draft));
-            self.assistant_draft.clear();
+                .push(TranscriptEntry::Assistant(std::mem::take(
+                    &mut self.assistant_draft,
+                )));
         }
     }
 }
@@ -114,6 +119,17 @@ impl Default for App {
     fn default() -> Self {
         Self::new()
     }
+}
+
+pub(crate) enum TranscriptEntry {
+    User(String),
+    Assistant(String),
+    Tool {
+        id: String,
+        name: String,
+        outcome: Option<ToolOutcome>,
+    },
+    Error(String),
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
