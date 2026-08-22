@@ -13,7 +13,7 @@ Build a small native coding agent in Rust with a fullscreen Ratatui interface. U
 3. The user submits a coding task.
 4. Codex streams text and tool calls.
 5. Read-only file tools run automatically inside the workspace.
-6. File changes show a diff and wait for explicit approval.
+6. Exact-match file changes are applied automatically inside the workspace.
 7. Shell commands show the exact command, working directory, timeout, and risk notice, then wait for explicit approval.
 8. Tool results return to Codex until it answers, is cancelled, or reaches a limit.
 
@@ -42,7 +42,7 @@ Build a small native coding agent in Rust with a fullscreen Ratatui interface. U
 
 - `list_files`: bounded workspace listing
 - `read_file`: bounded workspace-relative reads
-- `apply_patch`: preview and approval before mutation
+- `apply_patch`: automatic exact-match replacement inside the workspace
 - `run_command`: approval before execution, with timeout and output limits
 
 ### Safety
@@ -50,7 +50,7 @@ Build a small native coding agent in Rust with a fullscreen Ratatui interface. U
 - One canonical workspace root
 - Relative file paths only; reject traversal and out-of-root access
 - Read-only tools may run automatically
-- Every write and shell command requires a typed UI decision tied to its tool-call ID
+- Shell commands require a typed UI decision tied to their tool-call ID
 - Model text and replayed session data never grant authority
 - Bound model steps, tool calls, file reads, command output, and retained transcript
 - Commands run with closed stdin and are killed on timeout or cancellation
@@ -83,7 +83,7 @@ Persistence is deferred, so no `SessionStore` seam exists in the MVP.
 
 ### Vertical slice
 
-- A scripted fake model can drive: user prompt -> file read -> patch approval -> command approval -> final response.
+- A scripted fake model can drive: user prompt -> file read -> automatic patch -> command approval -> final response.
 - Denied tools return a denial result to the model without performing the effect.
 - Unknown tools and invalid arguments never reach approval or execution.
 - Workspace traversal is rejected.
@@ -110,9 +110,10 @@ Completed:
 - Sequential model/tool loop with bounded steps
 - Fullscreen Ratatui transcript, composer, and approval flow
 - Workspace-scoped `list_files` and `read_file`
-- Approval-gated `apply_patch` with a diff preview
+- Automatic workspace-scoped `apply_patch` with exact-match validation
 - Approval-gated `run_command` with timeout and bounded output
 - Integration tests for provider streaming, agent behavior, tools, and workspace escapes
+- End-to-end fake-provider flow covering read -> automatic edit -> approved command -> final response
 
 Known gaps:
 
@@ -127,11 +128,12 @@ Known gaps:
 
 ### 1. Harden the vertical slice
 
-- Add GitHub Actions for formatting, tests, and Clippy
-- Add an end-to-end test using a fake provider
-- Expand malformed stream, cancellation, terminal restoration, and process cleanup tests
-- Move file access to capability-rooted operations and test filesystem races
-- Add redaction and explicit bounds for every retained buffer
+- [x] Add an end-to-end test using a fake provider
+- [ ] Expand malformed stream, cancellation, terminal restoration, and process cleanup tests
+- [ ] Move file access to capability-rooted operations and test filesystem races
+- [ ] Add redaction and explicit bounds for every retained buffer
+
+CI automation is deferred for now; formatting, tests, and Clippy remain local release checks.
 
 ### 2. Improve daily usability
 

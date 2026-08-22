@@ -1,11 +1,13 @@
 use std::{
     collections::VecDeque,
+    fs,
     sync::{Arc, Mutex},
 };
 
 use async_trait::async_trait;
 use futures_util::{StreamExt, stream};
 use serde_json::{Value, json};
+use tempfile::tempdir;
 use yap::{
     agent::{Agent, AgentEvent, ToolOutcome},
     approval::{ApprovalBroker, ApprovalRequest, Decision, Risk},
@@ -14,6 +16,7 @@ use yap::{
         ToolSpec,
     },
     tool::{Tool, ToolError, ToolOutput},
+    tools::ApplyPatchTool,
 };
 
 struct ScriptedModel {
@@ -157,6 +160,58 @@ async fn agent_executes_a_tool_and_continues_with_its_result() {
             },
         ]
     );
+}
+
+#[tokio::test]
+async fn agent_applies_workspace_edits_without_requesting_approval() {
+    let workspace = tempdir().expect("workspace should be created");
+    let path = workspace.path().join("main.rs");
+    fs::write(&path, "old\n").expect("file should be created");
+    let model = ScriptedModel {
+        responses: Mutex::new(VecDeque::from([
+            vec![
+                Ok(ModelEvent::ToolCallStarted {
+                    id: "call_edit".into(),
+                    name: "apply_patch".into(),
+                }),
+                Ok(ModelEvent::ToolArgumentsDelta {
+                    id: "call_edit".into(),
+                    delta: "{\"path\":\"main.rs\",\"old_text\":\"old\",\"new_text\":\"new\"}"
+                        .into(),
+                }),
+                Ok(ModelEvent::Finished(FinishReason::Completed)),
+            ],
+            vec![
+                Ok(ModelEvent::TextDelta("Updated.".into())),
+                Ok(ModelEvent::Finished(FinishReason::Completed)),
+            ],
+        ])),
+        requests: Arc::new(Mutex::new(Vec::new())),
+    };
+    let approval_requests = Arc::new(Mutex::new(Vec::new()));
+    let mut agent = Agent::new(model, "gpt-5.3-codex");
+    agent.set_approval_broker(DenyingApproval {
+        requests: approval_requests.clone(),
+    });
+    let patch = ApplyPatchTool::new(workspace.path()).expect("workspace should be valid");
+    let patch_arguments = json!({
+        "path": "main.rs",
+        "old_text": "old",
+        "new_text": "new"
+    });
+    assert_eq!(patch.risk(&patch_arguments), Risk::WorkspaceWrite);
+    agent.register_tool(patch);
+
+    agent
+        .run_turn("Update main")
+        .await
+        .expect("turn should complete");
+
+    assert_eq!(
+        fs::read_to_string(path).expect("file should remain readable"),
+        "new\n"
+    );
+    assert!(approval_requests.lock().unwrap().is_empty());
 }
 
 #[tokio::test]

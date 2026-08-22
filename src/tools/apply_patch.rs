@@ -50,7 +50,7 @@ impl Tool for ApplyPatchTool {
     }
 
     fn risk(&self, _arguments: &Value) -> Risk {
-        Risk::Mutating
+        Risk::WorkspaceWrite
     }
 
     fn approval_preview(&self, arguments: &Value) -> Result<Option<String>, ToolError> {

@@ -5,6 +5,7 @@ use tokio::sync::{mpsc, oneshot};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Risk {
     ReadOnly,
+    WorkspaceWrite,
     Mutating,
 }
 

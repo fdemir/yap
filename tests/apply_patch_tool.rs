@@ -21,7 +21,7 @@ async fn apply_patch_replaces_one_exact_match_inside_the_workspace() {
         "new_text": "    new();"
     });
 
-    assert_eq!(tool.risk(&arguments), Risk::Mutating);
+    assert_eq!(tool.risk(&arguments), Risk::WorkspaceWrite);
     let output = tool
         .execute(arguments)
         .await

@@ -123,7 +123,7 @@ where
                     .ok_or_else(|| AgentError::UnknownTool(call.name.clone()))?;
                 let risk = tool.risk(&arguments);
                 let decision = match risk {
-                    Risk::ReadOnly => Decision::Allow,
+                    Risk::ReadOnly | Risk::WorkspaceWrite => Decision::Allow,
                     Risk::Mutating => {
                         let preview = tool.approval_preview(&arguments)?;
                         self.approval_broker
