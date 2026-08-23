@@ -39,7 +39,7 @@ impl ApprovalBroker for AllowCommands {
 #[tokio::test]
 async fn cancelling_a_turn_stops_a_running_command_promptly() {
     let workspace = tempdir().expect("workspace should be created");
-    let marker = workspace.path().join("started");
+    let descendant_pid_file = workspace.path().join("descendant.pid");
     let provider = CommandProvider {
         responses: Mutex::new(VecDeque::from([vec![
             Ok(ModelEvent::ToolCallStarted {
@@ -48,7 +48,7 @@ async fn cancelling_a_turn_stops_a_running_command_promptly() {
             }),
             Ok(ModelEvent::ToolArgumentsDelta {
                 id: "command_1".into(),
-                delta: "{\"command\":\"touch started && sleep 10\"}".into(),
+                delta: "{\"command\":\"sh -c 'sleep 10 & echo $! > descendant.pid; wait'\"}".into(),
             }),
             Ok(ModelEvent::Finished(FinishReason::Completed)),
         ]])),
@@ -67,7 +67,13 @@ async fn cancelling_a_turn_stops_a_running_command_promptly() {
             .await
     });
     while !matches!(event_rx.recv().await, Some(AgentEvent::ToolStarted { .. })) {}
-    wait_for_file(&marker).await;
+    wait_for_file(&descendant_pid_file).await;
+    let descendant_pid = std::fs::read_to_string(&descendant_pid_file)
+        .expect("descendant pid should be readable")
+        .trim()
+        .parse::<i32>()
+        .expect("descendant pid should be numeric");
+    assert!(process_exists(descendant_pid));
 
     let cancelled_at = Instant::now();
     cancellation.cancel();
@@ -78,6 +84,7 @@ async fn cancelling_a_turn_stops_a_running_command_promptly() {
 
     assert!(matches!(result, Err(AgentError::Cancelled)));
     assert!(cancelled_at.elapsed() < Duration::from_secs(1));
+    wait_for_process_exit(descendant_pid).await;
 }
 
 async fn wait_for_file(path: &std::path::Path) {
@@ -86,4 +93,20 @@ async fn wait_for_file(path: &std::path::Path) {
         assert!(Instant::now() < deadline, "command did not start in time");
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+}
+
+async fn wait_for_process_exit(pid: i32) {
+    let deadline = Instant::now() + Duration::from_secs(1);
+    while process_exists(pid) {
+        assert!(
+            Instant::now() < deadline,
+            "descendant process {pid} survived cancellation"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+}
+
+fn process_exists(pid: i32) -> bool {
+    rustix::process::Pid::from_raw(pid)
+        .is_some_and(|pid| rustix::process::test_kill_process(pid).is_ok())
 }

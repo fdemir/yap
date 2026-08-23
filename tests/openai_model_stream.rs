@@ -116,6 +116,8 @@ async fn model_stream_normalizes_function_call_events() {
         "data: {\"type\":\"response.output_item.added\",\"output_index\":0,\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"read_file\",\"arguments\":\"\"}}\n\n",
         "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"output_index\":0,\"delta\":\"{\\\"path\\\":\"}\n\n",
         "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_1\",\"output_index\":0,\"delta\":\"\\\"src/main.rs\\\"}\"}\n\n",
+        "data: {\"type\":\"response.function_call_arguments.done\",\"item_id\":\"fc_1\"}\n\n",
+        "data: {\"type\":\"response.output_item.done\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"read_file\"}}\n\n",
         "data: {\"type\":\"response.completed\"}\n\n",
     ])
     .await
@@ -144,6 +146,181 @@ async fn model_stream_normalizes_function_call_events() {
             }),
             Ok(ModelEvent::Finished(FinishReason::Completed)),
         ]
+    );
+}
+
+#[tokio::test]
+async fn model_stream_rejects_duplicate_function_call_items() {
+    let endpoint = serve_fragmented_sse(&[
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"read_file\"}}\n\n",
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_2\",\"name\":\"read_file\"}}\n\n",
+    ])
+    .await
+    .expect("fixture server should start");
+    let model = OpenAiModel::new(endpoint, "test-key");
+
+    let events = model
+        .stream(ModelRequest::new("gpt-5.3-codex", "Read main"))
+        .collect::<Vec<_>>()
+        .await;
+
+    assert_eq!(
+        events.last(),
+        Some(&Err(yap::model::ModelError::Protocol(
+            "duplicate function call item fc_1".into(),
+        )))
+    );
+}
+
+#[tokio::test]
+async fn model_stream_stops_at_the_completed_event() {
+    let endpoint = serve_fragmented_sse(&[
+        "data: {\"type\":\"response.completed\"}\n\n",
+        "data: not-json\n\n",
+    ])
+    .await
+    .expect("fixture server should start");
+    let model = OpenAiModel::new(endpoint, "test-key");
+
+    let events = model
+        .stream(ModelRequest::new("gpt-5.3-codex", "Say hello"))
+        .collect::<Vec<_>>()
+        .await;
+
+    assert_eq!(
+        events,
+        vec![Ok(ModelEvent::Finished(FinishReason::Completed))]
+    );
+}
+
+#[tokio::test]
+async fn model_stream_rejects_an_oversized_sse_event() {
+    let oversized = format!("data: {}\n\n", "x".repeat(256 * 1024 + 1));
+    let endpoint = serve_fragmented_sse(&[&oversized])
+        .await
+        .expect("fixture server should start");
+    let model = OpenAiModel::new(endpoint, "test-key");
+
+    let events = model
+        .stream(ModelRequest::new("gpt-5.3-codex", "Say hello"))
+        .collect::<Vec<_>>()
+        .await;
+
+    assert_eq!(
+        events,
+        vec![Err(yap::model::ModelError::Protocol(
+            "SSE event exceeds 262144 bytes".into(),
+        ))]
+    );
+}
+
+#[tokio::test]
+async fn model_stream_rejects_completion_with_an_open_function_call() {
+    let endpoint = serve_fragmented_sse(&[
+        "data: {\"type\":\"response.output_item.added\",\"item\":{\"type\":\"function_call\",\"id\":\"fc_1\",\"call_id\":\"call_1\",\"name\":\"read_file\"}}\n\n",
+        "data: {\"type\":\"response.completed\"}\n\n",
+    ])
+    .await
+    .expect("fixture server should start");
+    let model = OpenAiModel::new(endpoint, "test-key");
+
+    let events = model
+        .stream(ModelRequest::new("gpt-5.3-codex", "Read main"))
+        .collect::<Vec<_>>()
+        .await;
+
+    assert_eq!(
+        events.last(),
+        Some(&Err(yap::model::ModelError::Protocol(
+            "response completed with open function call fc_1".into(),
+        )))
+    );
+}
+
+#[tokio::test]
+async fn model_stream_rejects_non_monotonic_sequence_numbers() {
+    let endpoint = serve_fragmented_sse(&[
+        "data: {\"type\":\"response.created\",\"sequence_number\":1}\n\n",
+        "data: {\"type\":\"response.in_progress\",\"sequence_number\":1}\n\n",
+    ])
+    .await
+    .expect("fixture server should start");
+    let model = OpenAiModel::new(endpoint, "test-key");
+
+    let events = model
+        .stream(ModelRequest::new("gpt-5.3-codex", "Say hello"))
+        .collect::<Vec<_>>()
+        .await;
+
+    assert_eq!(
+        events,
+        vec![Err(yap::model::ModelError::Protocol(
+            "non-monotonic SSE sequence number 1".into(),
+        ))]
+    );
+}
+
+#[tokio::test]
+async fn model_stream_rejects_tool_arguments_before_the_function_call() {
+    let endpoint = serve_fragmented_sse(&[
+        "data: {\"type\":\"response.function_call_arguments.delta\",\"item_id\":\"fc_missing\",\"delta\":\"{}\"}\n\n",
+    ])
+    .await
+    .expect("fixture server should start");
+    let model = OpenAiModel::new(endpoint, "test-key");
+
+    let events = model
+        .stream(ModelRequest::new("gpt-5.3-codex", "Read main"))
+        .collect::<Vec<_>>()
+        .await;
+
+    assert_eq!(
+        events,
+        vec![Err(yap::model::ModelError::Protocol(
+            "tool arguments reference unknown item fc_missing".into(),
+        ))]
+    );
+}
+
+#[tokio::test]
+async fn model_stream_rejects_a_text_delta_without_delta_text() {
+    let endpoint = serve_fragmented_sse(&["data: {\"type\":\"response.output_text.delta\"}\n\n"])
+        .await
+        .expect("fixture server should start");
+    let model = OpenAiModel::new(endpoint, "test-key");
+
+    let events = model
+        .stream(ModelRequest::new("gpt-5.3-codex", "Say hello"))
+        .collect::<Vec<_>>()
+        .await;
+
+    assert_eq!(
+        events,
+        vec![Err(yap::model::ModelError::Protocol(
+            "text delta is missing delta".into(),
+        ))]
+    );
+}
+
+#[tokio::test]
+async fn model_stream_surfaces_an_incomplete_provider_response() {
+    let endpoint = serve_fragmented_sse(&[
+        "data: {\"type\":\"response.incomplete\",\"response\":{\"incomplete_details\":{\"reason\":\"max_output_tokens\"}}}\n\n",
+    ])
+    .await
+    .expect("fixture server should start");
+    let model = OpenAiModel::new(endpoint, "test-key");
+
+    let events = model
+        .stream(ModelRequest::new("gpt-5.3-codex", "Say hello"))
+        .collect::<Vec<_>>()
+        .await;
+
+    assert_eq!(
+        events,
+        vec![Err(yap::model::ModelError::Provider(
+            "max_output_tokens".into(),
+        ))]
     );
 }
 

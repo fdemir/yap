@@ -25,6 +25,25 @@ async fn list_files_returns_sorted_workspace_entries() {
 }
 
 #[tokio::test]
+async fn list_files_limits_large_directories() {
+    let workspace = tempdir().expect("workspace should be created");
+    for index in 0..2_001 {
+        fs::write(workspace.path().join(format!("{index:04}.txt")), "")
+            .expect("file should be created");
+    }
+    let tool = ListFilesTool::new(workspace.path()).expect("workspace should be valid");
+
+    let output = tool
+        .execute(json!({"path": "."}))
+        .await
+        .expect("listing should succeed")
+        .into_model_text();
+
+    assert!(output.contains("[listing truncated after 2000 entries]"));
+    assert_eq!(output.lines().count(), 2_001);
+}
+
+#[tokio::test]
 #[cfg(unix)]
 async fn list_files_rejects_a_symlink_outside_the_workspace() {
     use std::os::unix::fs::symlink;

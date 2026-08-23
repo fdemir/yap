@@ -47,6 +47,64 @@ async fn agent_turn_returns_the_completed_assistant_text() {
 }
 
 #[tokio::test]
+async fn agent_turn_rejects_oversized_prompts_and_responses() {
+    let mut prompt_agent = Agent::new(
+        ScriptedModel::new(vec![Ok(ModelEvent::Finished(FinishReason::Completed))]),
+        "gpt-5.3-codex",
+    );
+    let prompt_error = prompt_agent
+        .run_turn("x".repeat(64 * 1024 + 1))
+        .await
+        .expect_err("oversized prompt should be rejected");
+    assert!(matches!(
+        prompt_error,
+        yap::agent::AgentError::LimitExceeded("user prompt")
+    ));
+
+    let mut response_agent = Agent::new(
+        ScriptedModel::new(vec![
+            Ok(ModelEvent::TextDelta("x".repeat(1024 * 1024 + 1))),
+            Ok(ModelEvent::Finished(FinishReason::Completed)),
+        ]),
+        "gpt-5.3-codex",
+    );
+    let response_error = response_agent
+        .run_turn("respond")
+        .await
+        .expect_err("oversized response should be rejected");
+    assert!(matches!(
+        response_error,
+        yap::agent::AgentError::LimitExceeded("assistant response")
+    ));
+}
+
+#[tokio::test]
+async fn agent_turn_rejects_oversized_tool_arguments() {
+    let model = ScriptedModel::new(vec![
+        Ok(ModelEvent::ToolCallStarted {
+            id: "call_1".into(),
+            name: "read_file".into(),
+        }),
+        Ok(ModelEvent::ToolArgumentsDelta {
+            id: "call_1".into(),
+            delta: "x".repeat(256 * 1024 + 1),
+        }),
+        Ok(ModelEvent::Finished(FinishReason::Completed)),
+    ]);
+    let mut agent = Agent::new(model, "gpt-5.3-codex");
+
+    let error = agent
+        .run_turn("read")
+        .await
+        .expect_err("oversized tool arguments should be rejected");
+
+    assert!(matches!(
+        error,
+        yap::agent::AgentError::LimitExceeded("tool arguments")
+    ));
+}
+
+#[tokio::test]
 async fn agent_turn_stops_when_cancelled() {
     let cancellation = CancellationToken::new();
     let task_cancellation = cancellation.clone();

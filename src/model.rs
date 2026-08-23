@@ -1,13 +1,39 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 use async_stream::try_stream;
-use eventsource_stream::Eventsource;
 use futures_util::{StreamExt, stream::BoxStream};
+use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
+use crate::security::bounded_redacted;
+
 pub type ModelStream<'a> = BoxStream<'a, Result<ModelEvent, ModelError>>;
+
+const MAX_SSE_EVENT_BYTES: usize = 256 * 1024;
+const MAX_STREAM_FIELD_BYTES: usize = 64 * 1024;
+const MAX_PROVIDER_ERROR_BYTES: usize = 64 * 1024;
+
+struct ToolStreamState {
+    call_id: String,
+    name: String,
+    arguments_done: bool,
+    closed: bool,
+}
+
+#[derive(Default)]
+struct ResponseStreamState {
+    tool_calls: HashMap<String, ToolStreamState>,
+    call_ids: HashSet<String>,
+    last_sequence_number: Option<u64>,
+}
+
+enum NormalizedResponseEvent {
+    Ignore,
+    Emit(ModelEvent),
+    Complete,
+}
 
 pub trait Model: Send + Sync {
     fn stream(&self, request: ModelRequest) -> ModelStream<'_>;
@@ -170,7 +196,7 @@ pub enum ModelError {
 pub struct OpenAiModel {
     client: reqwest::Client,
     endpoint: String,
-    api_key: String,
+    api_key: SecretString,
 }
 
 impl OpenAiModel {
@@ -178,7 +204,7 @@ impl OpenAiModel {
         Self {
             client: reqwest::Client::new(),
             endpoint: endpoint.into(),
-            api_key: api_key.into(),
+            api_key: SecretString::from(api_key.into()),
         }
     }
 }
@@ -192,6 +218,266 @@ fn required_string<'a>(
         .get(field)
         .and_then(Value::as_str)
         .ok_or_else(|| ModelError::Protocol(format!("{event_name} is missing {field}")))
+}
+
+fn bounded_string<'a>(
+    value: &'a Value,
+    field: &str,
+    event_name: &str,
+) -> Result<&'a str, ModelError> {
+    let value = required_string(value, field, event_name)?;
+    if value.len() > MAX_STREAM_FIELD_BYTES {
+        return Err(ModelError::Protocol(format!(
+            "{event_name} {field} exceeds {MAX_STREAM_FIELD_BYTES} bytes"
+        )));
+    }
+    Ok(value)
+}
+
+enum ParsedSseEvent {
+    Data(String),
+    Ignored,
+}
+
+fn take_sse_event(buffer: &mut Vec<u8>) -> Result<Option<ParsedSseEvent>, ModelError> {
+    let Some((boundary, delimiter_len)) = sse_boundary(buffer) else {
+        if buffer.len() > MAX_SSE_EVENT_BYTES {
+            return Err(ModelError::Protocol(format!(
+                "SSE event exceeds {MAX_SSE_EVENT_BYTES} bytes"
+            )));
+        }
+        return Ok(None);
+    };
+    if boundary > MAX_SSE_EVENT_BYTES {
+        return Err(ModelError::Protocol(format!(
+            "SSE event exceeds {MAX_SSE_EVENT_BYTES} bytes"
+        )));
+    }
+    let raw = buffer.drain(..boundary).collect::<Vec<_>>();
+    buffer.drain(..delimiter_len);
+    let raw = std::str::from_utf8(&raw)
+        .map_err(|error| ModelError::Protocol(format!("SSE event is not UTF-8: {error}")))?;
+    let normalized = raw.replace("\r\n", "\n").replace('\r', "\n");
+    let mut data = Vec::new();
+    for line in normalized.lines() {
+        if let Some(value) = line.strip_prefix("data:") {
+            data.push(value.strip_prefix(' ').unwrap_or(value));
+        }
+    }
+    Ok(Some(if data.is_empty() {
+        ParsedSseEvent::Ignored
+    } else {
+        ParsedSseEvent::Data(data.join("\n"))
+    }))
+}
+
+fn sse_boundary(buffer: &[u8]) -> Option<(usize, usize)> {
+    for index in 0..buffer.len() {
+        let Some(first) = line_ending_len(buffer, index) else {
+            continue;
+        };
+        let second_index = index + first;
+        if let Some(second) = line_ending_len(buffer, second_index) {
+            return Some((index, first + second));
+        }
+    }
+    None
+}
+
+fn line_ending_len(buffer: &[u8], index: usize) -> Option<usize> {
+    match buffer.get(index) {
+        Some(b'\n') => Some(1),
+        Some(b'\r') if buffer.get(index + 1) == Some(&b'\n') => Some(2),
+        Some(b'\r') => Some(1),
+        _ => None,
+    }
+}
+
+impl ResponseStreamState {
+    fn normalize(&mut self, data: &str) -> Result<NormalizedResponseEvent, ModelError> {
+        let payload: Value =
+            serde_json::from_str(data).map_err(|error| ModelError::Protocol(error.to_string()))?;
+        let event_type = required_string(&payload, "type", "event")?;
+        self.accept_sequence_number(&payload)?;
+
+        match event_type {
+            "response.output_text.delta" => {
+                let delta = bounded_string(&payload, "delta", "text delta")?;
+                Ok(NormalizedResponseEvent::Emit(ModelEvent::TextDelta(
+                    delta.to_owned(),
+                )))
+            }
+            "response.output_item.added"
+                if payload.pointer("/item/type").and_then(Value::as_str)
+                    == Some("function_call") =>
+            {
+                self.start_tool_call(&payload)
+            }
+            "response.function_call_arguments.delta" => self.tool_arguments_delta(&payload),
+            "response.function_call_arguments.done" => {
+                self.tool_arguments_done(&payload)?;
+                Ok(NormalizedResponseEvent::Ignore)
+            }
+            "response.output_item.done"
+                if payload.pointer("/item/type").and_then(Value::as_str)
+                    == Some("function_call") =>
+            {
+                self.finish_tool_call(&payload)?;
+                Ok(NormalizedResponseEvent::Ignore)
+            }
+            "response.completed" => {
+                if let Some((item_id, _)) = self.tool_calls.iter().find(|(_, state)| !state.closed)
+                {
+                    return Err(ModelError::Protocol(format!(
+                        "response completed with open function call {item_id}"
+                    )));
+                }
+                Ok(NormalizedResponseEvent::Complete)
+            }
+            "response.failed" | "response.incomplete" => {
+                let message = payload
+                    .pointer("/response/error/message")
+                    .or_else(|| payload.pointer("/response/incomplete_details/reason"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("provider response failed");
+                Err(ModelError::Provider(bounded_redacted(
+                    message,
+                    MAX_PROVIDER_ERROR_BYTES,
+                    "provider error",
+                )))
+            }
+            _ => Ok(NormalizedResponseEvent::Ignore),
+        }
+    }
+
+    fn accept_sequence_number(&mut self, payload: &Value) -> Result<(), ModelError> {
+        let Some(sequence) = payload.get("sequence_number").and_then(Value::as_u64) else {
+            return Ok(());
+        };
+        if self
+            .last_sequence_number
+            .is_some_and(|last| sequence <= last)
+        {
+            return Err(ModelError::Protocol(format!(
+                "non-monotonic SSE sequence number {sequence}"
+            )));
+        }
+        self.last_sequence_number = Some(sequence);
+        Ok(())
+    }
+
+    fn start_tool_call(&mut self, payload: &Value) -> Result<NormalizedResponseEvent, ModelError> {
+        let item = payload
+            .get("item")
+            .ok_or_else(|| ModelError::Protocol("function call is missing item".into()))?;
+        let item_id = bounded_string(item, "id", "function call")?;
+        let call_id = bounded_string(item, "call_id", "function call")?;
+        let name = bounded_string(item, "name", "function call")?;
+        if self.tool_calls.contains_key(item_id) {
+            return Err(ModelError::Protocol(format!(
+                "duplicate function call item {item_id}"
+            )));
+        }
+        if !self.call_ids.insert(call_id.to_owned()) {
+            return Err(ModelError::Protocol(format!(
+                "duplicate function call id {call_id}"
+            )));
+        }
+        self.tool_calls.insert(
+            item_id.to_owned(),
+            ToolStreamState {
+                call_id: call_id.to_owned(),
+                name: name.to_owned(),
+                arguments_done: false,
+                closed: false,
+            },
+        );
+        Ok(NormalizedResponseEvent::Emit(ModelEvent::ToolCallStarted {
+            id: call_id.to_owned(),
+            name: name.to_owned(),
+        }))
+    }
+
+    fn tool_arguments_delta(&self, payload: &Value) -> Result<NormalizedResponseEvent, ModelError> {
+        let item_id = bounded_string(payload, "item_id", "tool arguments delta")?;
+        let state = self.tool_calls.get(item_id).ok_or_else(|| {
+            ModelError::Protocol(format!("tool arguments reference unknown item {item_id}"))
+        })?;
+        if state.closed {
+            return Err(ModelError::Protocol(format!(
+                "tool arguments arrived after item {item_id} completed"
+            )));
+        }
+        if state.arguments_done {
+            return Err(ModelError::Protocol(format!(
+                "tool arguments arrived after item {item_id} arguments completed"
+            )));
+        }
+        let delta = bounded_string(payload, "delta", "tool arguments delta")?;
+        Ok(NormalizedResponseEvent::Emit(
+            ModelEvent::ToolArgumentsDelta {
+                id: state.call_id.clone(),
+                delta: delta.to_owned(),
+            },
+        ))
+    }
+
+    fn tool_arguments_done(&mut self, payload: &Value) -> Result<(), ModelError> {
+        let item_id = bounded_string(payload, "item_id", "tool arguments done")?;
+        let state = self.tool_calls.get_mut(item_id).ok_or_else(|| {
+            ModelError::Protocol(format!("tool arguments reference unknown item {item_id}"))
+        })?;
+        if state.closed {
+            return Err(ModelError::Protocol(format!(
+                "tool arguments completed after item {item_id} completed"
+            )));
+        }
+        if state.arguments_done {
+            return Err(ModelError::Protocol(format!(
+                "duplicate tool arguments completion {item_id}"
+            )));
+        }
+        state.arguments_done = true;
+        Ok(())
+    }
+
+    fn finish_tool_call(&mut self, payload: &Value) -> Result<(), ModelError> {
+        let item = payload.get("item").ok_or_else(|| {
+            ModelError::Protocol("function call completion is missing item".into())
+        })?;
+        let item_id = bounded_string(item, "id", "function call completion")?;
+        let state = self.tool_calls.get_mut(item_id).ok_or_else(|| {
+            ModelError::Protocol(format!(
+                "function call completion references unknown item {item_id}"
+            ))
+        })?;
+        if state.closed {
+            return Err(ModelError::Protocol(format!(
+                "duplicate function call completion {item_id}"
+            )));
+        }
+        if !state.arguments_done {
+            return Err(ModelError::Protocol(format!(
+                "function call {item_id} completed before its arguments"
+            )));
+        }
+        if let Some(call_id) = item.get("call_id").and_then(Value::as_str)
+            && call_id != state.call_id
+        {
+            return Err(ModelError::Protocol(format!(
+                "function call {item_id} changed call id"
+            )));
+        }
+        if let Some(name) = item.get("name").and_then(Value::as_str)
+            && name != state.name
+        {
+            return Err(ModelError::Protocol(format!(
+                "function call {item_id} changed name"
+            )));
+        }
+        state.closed = true;
+        Ok(())
+    }
 }
 
 impl Model for OpenAiModel {
@@ -220,7 +506,7 @@ impl Model for OpenAiModel {
             let send = self
                 .client
                 .post(&self.endpoint)
-                .bearer_auth(&self.api_key)
+                .bearer_auth(self.api_key.expose_secret())
                 .json(&body)
                 .send();
             let response = tokio::select! {
@@ -231,64 +517,33 @@ impl Model for OpenAiModel {
                         .map_err(|error| ModelError::Transport(error.to_string()))),
             }?;
 
-            let mut source = response.bytes_stream().eventsource();
-            let mut tool_call_ids = HashMap::new();
+            let mut source = response.bytes_stream();
+            let mut sse_buffer = Vec::new();
+            let mut state = ResponseStreamState::default();
             let mut completed = false;
-            loop {
-                let event = tokio::select! {
+            'stream: loop {
+                let chunk = tokio::select! {
                     _ = cancellation.cancelled() => Err(ModelError::Cancelled),
-                    event = source.next() => Ok(event),
+                    chunk = source.next() => Ok(chunk),
                 }?;
-                let Some(event) = event else { break };
-                let event = event.map_err(|error| ModelError::Protocol(error.to_string()))?;
-                let payload: Value = serde_json::from_str(&event.data)
-                    .map_err(|error| ModelError::Protocol(error.to_string()))?;
-
-                let event_type = required_string(&payload, "type", "event")?;
-                match event_type {
-                    "response.output_text.delta" => {
-                        let delta = required_string(&payload, "delta", "text delta")?;
-                        yield ModelEvent::TextDelta(delta.to_owned());
-                    }
-                    "response.output_item.added"
-                        if payload.pointer("/item/type").and_then(Value::as_str)
-                            == Some("function_call") =>
-                    {
-                        let item = payload
-                            .get("item")
-                            .ok_or_else(|| ModelError::Protocol("function call is missing item".into()))?;
-                        let item_id = required_string(item, "id", "function call")?;
-                        let call_id = required_string(item, "call_id", "function call")?;
-                        let name = required_string(item, "name", "function call")?;
-                        tool_call_ids.insert(item_id.to_owned(), call_id.to_owned());
-                        yield ModelEvent::ToolCallStarted {
-                            id: call_id.to_owned(),
-                            name: name.to_owned(),
+                let Some(chunk) = chunk else { break };
+                let chunk = chunk.map_err(|error| ModelError::Transport(error.to_string()))?;
+                for piece in chunk.chunks(8 * 1024) {
+                    sse_buffer.extend_from_slice(piece);
+                    while let Some(event) = take_sse_event(&mut sse_buffer)? {
+                        let ParsedSseEvent::Data(data) = event else {
+                            continue;
                         };
+                        match state.normalize(&data)? {
+                            NormalizedResponseEvent::Ignore => {}
+                            NormalizedResponseEvent::Emit(event) => yield event,
+                            NormalizedResponseEvent::Complete => {
+                                completed = true;
+                                yield ModelEvent::Finished(FinishReason::Completed);
+                                break 'stream;
+                            }
+                        }
                     }
-                    "response.function_call_arguments.delta" => {
-                        let item_id = required_string(&payload, "item_id", "tool arguments delta")?;
-                        let call_id = tool_call_ids.get(item_id).ok_or_else(|| {
-                            ModelError::Protocol(format!("tool arguments reference unknown item {item_id}"))
-                        })?;
-                        let delta = required_string(&payload, "delta", "tool arguments delta")?;
-                        yield ModelEvent::ToolArgumentsDelta {
-                            id: call_id.clone(),
-                            delta: delta.to_owned(),
-                        };
-                    }
-                    "response.completed" => {
-                        completed = true;
-                        yield ModelEvent::Finished(FinishReason::Completed);
-                    }
-                    "response.failed" => {
-                        let message = payload
-                            .pointer("/response/error/message")
-                            .and_then(Value::as_str)
-                            .unwrap_or("provider response failed");
-                        Err(ModelError::Provider(message.to_owned()))?;
-                    }
-                    _ => {}
                 }
             }
 

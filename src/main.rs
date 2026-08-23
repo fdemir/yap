@@ -9,6 +9,7 @@ use yap::{
     app::App,
     approval::{ChannelApprovalBroker, Decision},
     model::OpenAiModel,
+    terminal::TerminalSession,
     tools::{ApplyPatchTool, ListFilesTool, ReadFileTool, RunCommandTool},
 };
 
@@ -72,9 +73,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     });
 
     let workspace_label = workspace_label(&workspace);
-    let mut terminal = ratatui::init();
+    let mut terminal = TerminalSession::start()?;
     let result = run_tui(
-        &mut terminal,
+        terminal.terminal_mut(),
         &model_name,
         &workspace_label,
         prompt_tx,
@@ -82,8 +83,9 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
         &mut approval_rx,
     )
     .await;
-    ratatui::restore();
+    terminal.restore_now();
     agent_task.abort();
+    let _ = agent_task.await;
     result?;
     Ok(())
 }
@@ -115,10 +117,19 @@ async fn run_tui(
     let mut app = App::new();
     let mut terminal_events = EventStream::new();
     let mut active_cancellation: Option<CancellationToken> = None;
+    let shutdown = shutdown_signal();
+    tokio::pin!(shutdown);
 
     loop {
         terminal.draw(|frame| yap::ui::render(frame, &app, model, workspace))?;
         tokio::select! {
+            signal = &mut shutdown => {
+                signal?;
+                if let Some(cancellation) = &active_cancellation {
+                    cancellation.cancel();
+                }
+                return Ok(());
+            }
             terminal_event = terminal_events.next() => {
                 match terminal_event {
                     Some(Ok(Event::Key(key))) if matches!(key.kind, KeyEventKind::Press | KeyEventKind::Repeat) => {
@@ -201,6 +212,25 @@ async fn handle_key(
         _ => {}
     }
     true
+}
+
+async fn shutdown_signal() -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use tokio::signal::unix::{SignalKind, signal};
+
+        let mut terminate = signal(SignalKind::terminate())?;
+        let mut hangup = signal(SignalKind::hangup())?;
+        tokio::select! {
+            result = tokio::signal::ctrl_c() => result,
+            _ = terminate.recv() => Ok(()),
+            _ = hangup.recv() => Ok(()),
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        tokio::signal::ctrl_c().await
+    }
 }
 
 fn cancel_active_turn(app: &mut App, active_cancellation: &mut Option<CancellationToken>) {

@@ -10,6 +10,7 @@ use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 use crate::{
     agent::ToolOutcome,
     app::{App, Status, TranscriptEntry},
+    security::terminal_safe_text,
 };
 
 const ACCENT: Color = Color::Cyan;
@@ -47,7 +48,7 @@ fn render_transcript(frame: &mut Frame<'_>, area: Rect, app: &App) {
         lines.extend(
             app.assistant_draft
                 .lines()
-                .map(|line| Line::raw(line.to_owned())),
+                .map(|line| Line::raw(terminal_safe_text(line).into_owned())),
         );
     }
     if let Some(status) = active_status(app.status) {
@@ -96,7 +97,11 @@ fn push_entry_lines(lines: &mut Vec<Line<'static>>, entry: &TranscriptEntry, wid
             lines.push(Line::styled(fit_background_line("", width), style));
         }
         TranscriptEntry::Assistant(message) => {
-            lines.extend(message.lines().map(|line| Line::raw(line.to_owned())));
+            lines.extend(
+                message
+                    .lines()
+                    .map(|line| Line::raw(terminal_safe_text(line).into_owned())),
+            );
         }
         TranscriptEntry::Tool { name, outcome, .. } => {
             let (marker, foreground) = match outcome {
@@ -106,13 +111,13 @@ fn push_entry_lines(lines: &mut Vec<Line<'static>>, entry: &TranscriptEntry, wid
                 Some(ToolOutcome::Cancelled) => ("×", Color::Yellow),
             };
             lines.push(Line::styled(
-                format!("{marker} {name}"),
+                format!("{marker} {}", terminal_safe_text(name)),
                 Style::default().fg(foreground).add_modifier(Modifier::BOLD),
             ));
         }
         TranscriptEntry::Error(message) => {
             lines.push(Line::styled(
-                format!("Error: {message}"),
+                format!("Error: {}", terminal_safe_text(message)),
                 Style::default().fg(Color::Red),
             ));
         }
@@ -120,13 +125,14 @@ fn push_entry_lines(lines: &mut Vec<Line<'static>>, entry: &TranscriptEntry, wid
 }
 
 fn render_editor(frame: &mut Frame<'_>, area: Rect, app: &App) {
+    let composer = terminal_safe_text(&app.composer);
     let border = if app.status == Status::Working {
         ACCENT
     } else {
         MUTED
     };
     frame.render_widget(
-        Paragraph::new(app.composer.as_str()).block(
+        Paragraph::new(composer.as_ref()).block(
             Block::default()
                 .borders(Borders::TOP | Borders::BOTTOM)
                 .border_style(Style::default().fg(border))
@@ -135,7 +141,7 @@ fn render_editor(frame: &mut Frame<'_>, area: Rect, app: &App) {
         area,
     );
 
-    let cursor_offset = UnicodeWidthStr::width(app.composer.as_str()) as u16;
+    let cursor_offset = UnicodeWidthStr::width(composer.as_ref()) as u16;
     let cursor_x = area
         .x
         .saturating_add(1)
@@ -153,13 +159,17 @@ fn render_approval(frame: &mut Frame<'_>, area: Rect, app: &App) {
         serde_json::to_string_pretty(&approval.request.arguments)
             .unwrap_or_else(|_| "unable to display arguments".into())
     });
+    let body = terminal_safe_text(&body);
     frame.render_widget(
         Paragraph::new(format!("{body}\n\nenter allow once · d/esc deny"))
             .block(
                 Block::default()
                     .borders(Borders::TOP | Borders::BOTTOM)
                     .border_style(Style::default().fg(Color::Yellow))
-                    .title(format!(" {} approval ", approval.request.tool_name))
+                    .title(format!(
+                        " {} approval ",
+                        terminal_safe_text(&approval.request.tool_name)
+                    ))
                     .padding(Padding::horizontal(1)),
             )
             .wrap(Wrap { trim: false }),
@@ -173,7 +183,8 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, model: &str, work
         .constraints([Constraint::Length(1), Constraint::Length(1)])
         .split(area);
     frame.render_widget(
-        Paragraph::new(shorten_home(workspace)).style(Style::default().fg(MUTED)),
+        Paragraph::new(terminal_safe_text(&shorten_home(workspace)).into_owned())
+            .style(Style::default().fg(MUTED)),
         rows[0],
     );
 
@@ -186,7 +197,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, model: &str, work
         columns[0],
     );
     frame.render_widget(
-        Paragraph::new(format!("(openai) {model}"))
+        Paragraph::new(format!("(openai) {}", terminal_safe_text(model)))
             .alignment(Alignment::Right)
             .style(Style::default().fg(MUTED)),
         columns[1],
@@ -197,6 +208,7 @@ fn fit_background_line(text: &str, width: usize) -> String {
     if width == 0 {
         return String::new();
     }
+    let text = terminal_safe_text(text);
     let content_width = width.saturating_sub(2);
     let mut fitted = String::new();
     let mut used = 0;

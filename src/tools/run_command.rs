@@ -1,4 +1,10 @@
-use std::{io, path::PathBuf, process::Stdio, time::Duration};
+use std::{
+    io,
+    path::PathBuf,
+    process::Stdio,
+    sync::atomic::{AtomicUsize, Ordering},
+    time::Duration,
+};
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -11,17 +17,20 @@ use tokio::{
 use crate::{
     approval::Risk,
     model::ToolSpec,
+    process_tree::CommandSupervisor,
     tool::{Tool, ToolError, ToolOutput},
     tools::command_policy,
 };
 
 const DEFAULT_TIMEOUT: Duration = Duration::from_secs(30);
 const DEFAULT_MAX_OUTPUT_BYTES: usize = 64 * 1024;
+const DEFAULT_MAX_TOTAL_OUTPUT_BYTES: usize = 16 * 1024 * 1024;
 
 pub struct RunCommandTool {
     root: PathBuf,
     timeout: Duration,
     max_output_bytes: usize,
+    max_total_output_bytes: usize,
 }
 
 impl RunCommandTool {
@@ -38,10 +47,25 @@ impl RunCommandTool {
         timeout: Duration,
         max_output_bytes: usize,
     ) -> io::Result<Self> {
+        Self::with_output_limits(
+            root,
+            timeout,
+            max_output_bytes,
+            DEFAULT_MAX_TOTAL_OUTPUT_BYTES,
+        )
+    }
+
+    pub fn with_output_limits(
+        root: impl Into<PathBuf>,
+        timeout: Duration,
+        max_output_bytes: usize,
+        max_total_output_bytes: usize,
+    ) -> io::Result<Self> {
         Ok(Self {
             root: std::fs::canonicalize(root.into())?,
             timeout,
             max_output_bytes,
+            max_total_output_bytes,
         })
     }
 }
@@ -92,6 +116,7 @@ impl Tool for RunCommandTool {
     async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
         let arguments: RunCommandArguments = serde_json::from_value(arguments)
             .map_err(|error| ToolError::Execution(error.to_string()))?;
+        let supervisor = CommandSupervisor::start().await;
         let mut command = shell_command(&arguments.command);
         command
             .current_dir(&self.root)
@@ -99,9 +124,11 @@ impl Tool for RunCommandTool {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        configure_process_tree(&mut command);
         let mut child = command
             .spawn()
             .map_err(|error| ToolError::Execution(error.to_string()))?;
+        let mut process_tree = supervisor.track(child.id());
         let stdout = child
             .stdout
             .take()
@@ -110,17 +137,28 @@ impl Tool for RunCommandTool {
             .stderr
             .take()
             .ok_or_else(|| ToolError::Execution("command stderr was not captured".into()))?;
+        let total_output = AtomicUsize::new(0);
         let run = async {
             tokio::try_join!(
-                child.wait(),
-                read_capped(stdout, self.max_output_bytes),
-                read_capped(stderr, self.max_output_bytes),
+                wait_for_child(&mut child, &mut process_tree),
+                read_capped(
+                    stdout,
+                    self.max_output_bytes,
+                    self.max_total_output_bytes,
+                    &total_output,
+                ),
+                read_capped(
+                    stderr,
+                    self.max_output_bytes,
+                    self.max_total_output_bytes,
+                    &total_output,
+                ),
             )
         };
         let (status, stdout, stderr) = tokio::time::timeout(self.timeout, run)
             .await
-            .map_err(|_| ToolError::TimedOut)?
-            .map_err(|error| ToolError::Execution(error.to_string()))?;
+            .map_err(|_| ToolError::TimedOut)??;
+        process_tree.disarm();
         let exit_code = status
             .code()
             .map_or_else(|| "signal".into(), |code| code.to_string());
@@ -148,24 +186,64 @@ impl CappedOutput {
     }
 }
 
-async fn read_capped(mut reader: impl AsyncRead + Unpin, limit: usize) -> io::Result<CappedOutput> {
+async fn wait_for_child(
+    child: &mut tokio::process::Child,
+    process_tree: &mut crate::process_tree::ProcessTreeGuard,
+) -> Result<std::process::ExitStatus, ToolError> {
+    let mut refresh = tokio::time::interval(Duration::from_millis(2));
+    refresh.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+    loop {
+        tokio::select! {
+            status = child.wait() => {
+                let status = status.map_err(|error| ToolError::Execution(error.to_string()))?;
+                process_tree.leader_finished();
+                return Ok(status);
+            }
+            _ = refresh.tick() => process_tree.refresh(),
+        }
+    }
+}
+
+async fn read_capped(
+    mut reader: impl AsyncRead + Unpin,
+    retained_limit: usize,
+    total_limit: usize,
+    aggregate_total: &AtomicUsize,
+) -> Result<CappedOutput, ToolError> {
     let mut bytes = Vec::new();
     let mut total = 0usize;
     let mut buffer = [0; 8192];
     loop {
-        let read = reader.read(&mut buffer).await?;
+        let read = reader
+            .read(&mut buffer)
+            .await
+            .map_err(|error| ToolError::Execution(error.to_string()))?;
         if read == 0 {
             break;
         }
         total = total.saturating_add(read);
-        let remaining = limit.saturating_sub(bytes.len());
+        let aggregate = aggregate_total
+            .fetch_add(read, Ordering::Relaxed)
+            .saturating_add(read);
+        if aggregate > total_limit {
+            return Err(ToolError::OutputLimit { limit: total_limit });
+        }
+        let remaining = retained_limit.saturating_sub(bytes.len());
         bytes.extend_from_slice(&buffer[..read.min(remaining)]);
     }
     Ok(CappedOutput {
         bytes,
-        truncated: total > limit,
+        truncated: total > retained_limit,
     })
 }
+
+#[cfg(unix)]
+fn configure_process_tree(command: &mut Command) {
+    command.process_group(0);
+}
+
+#[cfg(windows)]
+fn configure_process_tree(_command: &mut Command) {}
 
 #[cfg(unix)]
 fn shell_command(command: &str) -> Command {

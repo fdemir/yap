@@ -1,4 +1,4 @@
-use std::{fs, io, path::PathBuf};
+use std::{io, path::PathBuf};
 
 use async_trait::async_trait;
 use serde::Deserialize;
@@ -8,17 +8,19 @@ use crate::{
     approval::Risk,
     model::ToolSpec,
     tool::{Tool, ToolError, ToolOutput},
-    tools::resolve_existing,
+    workspace::Workspace,
 };
 
+const DEFAULT_MAX_ENTRIES: usize = 2_000;
+
 pub struct ListFilesTool {
-    root: PathBuf,
+    workspace: Workspace,
 }
 
 impl ListFilesTool {
     pub fn new(root: impl Into<PathBuf>) -> io::Result<Self> {
         Ok(Self {
-            root: fs::canonicalize(root.into())?,
+            workspace: Workspace::open(root)?,
         })
     }
 }
@@ -50,24 +52,25 @@ impl Tool for ListFilesTool {
     async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
         let arguments: ListFilesArguments = serde_json::from_value(arguments)
             .map_err(|error| ToolError::Execution(error.to_string()))?;
-        let target = resolve_existing(&self.root, &arguments.path)?;
-        let entries =
-            fs::read_dir(target).map_err(|error| ToolError::Execution(error.to_string()))?;
+        let (entries, truncated) = self
+            .workspace
+            .read_dir_bounded(&arguments.path, DEFAULT_MAX_ENTRIES)?;
         let mut names = entries
+            .into_iter()
             .map(|entry| {
-                let entry = entry.map_err(|error| ToolError::Execution(error.to_string()))?;
-                let mut name = entry.file_name().to_string_lossy().into_owned();
-                if entry
-                    .file_type()
-                    .map_err(|error| ToolError::Execution(error.to_string()))?
-                    .is_dir()
-                {
-                    name.push('/');
+                if entry.is_dir {
+                    format!("{}/", entry.name)
+                } else {
+                    entry.name
                 }
-                Ok(name)
             })
-            .collect::<Result<Vec<_>, ToolError>>()?;
+            .collect::<Vec<_>>();
         names.sort();
+        if truncated {
+            names.push(format!(
+                "[listing truncated after {DEFAULT_MAX_ENTRIES} entries]"
+            ));
+        }
 
         Ok(ToolOutput::new(names.join("\n")))
     }

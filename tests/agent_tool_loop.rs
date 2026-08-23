@@ -79,6 +79,10 @@ impl Tool for MutatingTool {
         Risk::Mutating
     }
 
+    fn approval_preview(&self, _arguments: &Value) -> Result<Option<String>, ToolError> {
+        Ok(Some("x".repeat(70 * 1024)))
+    }
+
     async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
         self.calls.lock().unwrap().push(arguments);
         Ok(ToolOutput::new("command ran"))
@@ -242,7 +246,8 @@ async fn agent_requests_approval_before_a_command_accesses_an_external_path() {
                 }),
                 Ok(ModelEvent::ToolArgumentsDelta {
                     id: "command_1".into(),
-                    delta: "{\"command\":\"touch ../outside\"}".into(),
+                    delta: "{\"command\":\"OPENAI_API_KEY=sk-abcdefghijklmnop touch ../outside\"}"
+                        .into(),
                 }),
                 Ok(ModelEvent::Finished(FinishReason::Completed)),
             ],
@@ -267,10 +272,22 @@ async fn agent_requests_approval_before_a_command_accesses_an_external_path() {
 
     assert_eq!(outcome.assistant_text, "External command denied.");
     assert!(!root.path().join("outside").exists());
-    assert_eq!(
-        approval_requests.lock().unwrap()[0].risk,
-        Risk::ExternalAccess
+    let approvals = approval_requests.lock().unwrap();
+    assert_eq!(approvals[0].risk, Risk::ExternalAccess);
+    assert!(
+        !approvals[0]
+            .preview
+            .as_deref()
+            .unwrap_or_default()
+            .contains("sk-abcdefghijklmnop")
     );
+    assert!(
+        !approvals[0]
+            .arguments
+            .to_string()
+            .contains("sk-abcdefghijklmnop")
+    );
+    drop(approvals);
     assert_eq!(
         model_requests.lock().unwrap()[1].input().last(),
         Some(&ModelInput::FunctionCallOutput {
@@ -372,7 +389,15 @@ async fn agent_returns_a_denied_mutation_to_the_model_without_executing_it() {
 
     assert_eq!(outcome.assistant_text, "Command denied.");
     assert!(tool_calls.lock().unwrap().is_empty());
-    assert_eq!(approval_requests.lock().unwrap()[0].call_id, "call_2");
+    let approvals = approval_requests.lock().unwrap();
+    assert_eq!(approvals[0].call_id, "call_2");
+    let preview = approvals[0]
+        .preview
+        .as_deref()
+        .expect("approval should include a preview");
+    assert!(preview.len() <= 64 * 1024);
+    assert!(preview.contains("approval preview truncated"));
+    drop(approvals);
     assert_eq!(
         model_requests.lock().unwrap()[1].input().last(),
         Some(&ModelInput::FunctionCallOutput {

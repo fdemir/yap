@@ -9,12 +9,19 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     approval::{ApprovalBroker, ApprovalRequest, Decision, DenyAll, Risk},
     model::{Model, ModelError, ModelEvent, ModelInput, ModelRequest},
+    security::{MAX_APPROVAL_PREVIEW_BYTES, bounded_redacted, checked_append, redact_json},
     system_prompt::SYSTEM_PROMPT,
     tool::{Tool, ToolError, ToolOutput},
 };
 
 const MAX_STEPS: usize = 12;
 const DOOM_LOOP_THRESHOLD: usize = 3;
+const MAX_USER_PROMPT_BYTES: usize = 64 * 1024;
+const MAX_ASSISTANT_TEXT_BYTES: usize = 1024 * 1024;
+const MAX_TOOL_ARGUMENT_BYTES: usize = 256 * 1024;
+const MAX_TOOL_CALLS_PER_STEP: usize = 32;
+const MAX_TOOL_IDENTIFIER_BYTES: usize = 1024;
+const MAX_MODEL_INPUT_BYTES: usize = 2 * 1024 * 1024;
 
 pub struct Agent<M> {
     model: M,
@@ -60,7 +67,11 @@ where
         prompt: impl Into<String>,
         cancellation: CancellationToken,
     ) -> Result<TurnOutcome, AgentError> {
-        let mut input = vec![ModelInput::UserMessage(prompt.into())];
+        let prompt = prompt.into();
+        if prompt.len() > MAX_USER_PROMPT_BYTES {
+            return Err(AgentError::LimitExceeded("user prompt"));
+        }
+        let mut input = vec![ModelInput::UserMessage(prompt)];
         let mut recent_tool_calls = VecDeque::with_capacity(DOOM_LOOP_THRESHOLD - 1);
 
         for _ in 0..MAX_STEPS {
@@ -73,6 +84,9 @@ where
                 .map(|tool| tool.spec())
                 .collect::<Vec<_>>();
             tool_specs.sort_by(|left, right| left.name.cmp(&right.name));
+            if model_input_bytes(&input) > MAX_MODEL_INPUT_BYTES {
+                return Err(AgentError::LimitExceeded("model input"));
+            }
             let request = ModelRequest::from_input(self.model_name.clone(), input.clone())
                 .with_tools(tool_specs)
                 .with_system_prompt(SYSTEM_PROMPT)
@@ -95,10 +109,23 @@ where
                 };
                 match event {
                     ModelEvent::TextDelta(delta) => {
-                        assistant_text.push_str(&delta);
+                        if !checked_append(&mut assistant_text, &delta, MAX_ASSISTANT_TEXT_BYTES) {
+                            return Err(AgentError::LimitExceeded("assistant response"));
+                        }
                         self.emit(AgentEvent::AssistantDelta(delta)).await;
                     }
                     ModelEvent::ToolCallStarted { id, name } => {
+                        if id.len() > MAX_TOOL_IDENTIFIER_BYTES
+                            || name.len() > MAX_TOOL_IDENTIFIER_BYTES
+                        {
+                            return Err(AgentError::LimitExceeded("tool identifier"));
+                        }
+                        if tool_calls.len() == MAX_TOOL_CALLS_PER_STEP {
+                            return Err(AgentError::LimitExceeded("tool calls per step"));
+                        }
+                        if tool_calls.iter().any(|call| call.id == id) {
+                            return Err(AgentError::DuplicateToolCall(id));
+                        }
                         self.emit(AgentEvent::ToolStarted {
                             id: id.clone(),
                             name: name.clone(),
@@ -115,7 +142,9 @@ where
                             .iter_mut()
                             .find(|call| call.id == id)
                             .ok_or_else(|| AgentError::UnknownToolCall(id.clone()))?;
-                        call.arguments.push_str(&delta);
+                        if !checked_append(&mut call.arguments, &delta, MAX_TOOL_ARGUMENT_BYTES) {
+                            return Err(AgentError::LimitExceeded("tool arguments"));
+                        }
                     }
                     ModelEvent::Finished(_) => break,
                 }
@@ -175,12 +204,16 @@ where
                             "same tool call repeated {DOOM_LOOP_THRESHOLD} times\n\n{details}"
                         ));
                     }
+                    preview = preview.map(|preview| {
+                        bounded_redacted(&preview, MAX_APPROVAL_PREVIEW_BYTES, "approval preview")
+                    });
+                    let approval_arguments = redact_json(&arguments);
                     tokio::select! {
                         _ = cancellation.cancelled() => return Err(AgentError::Cancelled),
                         decision = self.approval_broker.decide(ApprovalRequest {
                             call_id: call.id.clone(),
                             tool_name: call.name.clone(),
-                            arguments: arguments.clone(),
+                            arguments: approval_arguments,
                             risk,
                             preview,
                         }) => decision,
@@ -247,6 +280,26 @@ pub enum ToolOutcome {
     Cancelled,
 }
 
+fn model_input_bytes(input: &[ModelInput]) -> usize {
+    input.iter().fold(0usize, |total, item| {
+        let item_bytes = match item {
+            ModelInput::UserMessage(message) | ModelInput::AssistantMessage(message) => {
+                message.len()
+            }
+            ModelInput::FunctionCall {
+                id,
+                name,
+                arguments,
+            } => id
+                .len()
+                .saturating_add(name.len())
+                .saturating_add(arguments.to_string().len()),
+            ModelInput::FunctionCallOutput { id, output } => id.len().saturating_add(output.len()),
+        };
+        total.saturating_add(item_bytes)
+    })
+}
+
 struct PendingToolCall {
     id: String,
     name: String,
@@ -268,10 +321,14 @@ pub enum AgentError {
     Tool(#[from] ToolError),
     #[error("tool arguments arrived for unknown call {0}")]
     UnknownToolCall(String),
+    #[error("model emitted duplicate tool call {0}")]
+    DuplicateToolCall(String),
     #[error("model requested unknown tool {0}")]
     UnknownTool(String),
     #[error("invalid arguments for tool {name}: {message}")]
     InvalidToolArguments { name: String, message: String },
     #[error("agent reached its step limit")]
     StepLimit,
+    #[error("agent exceeded the {0} limit")]
+    LimitExceeded(&'static str),
 }
