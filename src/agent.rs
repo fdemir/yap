@@ -9,7 +9,10 @@ use tokio_util::sync::CancellationToken;
 use crate::{
     approval::{ApprovalBroker, ApprovalRequest, Decision, DenyAll, Risk},
     model::{Model, ModelError, ModelEvent, ModelInput, ModelRequest},
-    security::{MAX_APPROVAL_PREVIEW_BYTES, bounded_redacted, checked_append, redact_json},
+    security::{
+        MAX_APPROVAL_PREVIEW_BYTES, MAX_TOOL_OUTPUT_BYTES, bounded_redacted, checked_append,
+        redact_json,
+    },
     system_prompt::SYSTEM_PROMPT,
     tool::{Tool, ToolError, ToolOutput},
 };
@@ -223,18 +226,36 @@ where
                 };
                 let (output, outcome) = match decision {
                     Decision::Allow => {
-                        let output = tokio::select! {
+                        let result = tokio::select! {
                             _ = cancellation.cancelled() => return Err(AgentError::Cancelled),
-                            output = tool.execute(arguments) => output?,
+                            output = tool.execute(arguments) => output,
                         };
-                        (output, ToolOutcome::Completed)
+                        match result {
+                            Ok(output) => (output, ToolOutcome::Completed),
+                            Err(error) => {
+                                self.emit(AgentEvent::ToolFinished {
+                                    id: call.id,
+                                    name: call.name,
+                                    outcome: ToolOutcome::Failed,
+                                    output: bounded_redacted(
+                                        &error.to_string(),
+                                        MAX_TOOL_OUTPUT_BYTES,
+                                        "tool error",
+                                    ),
+                                })
+                                .await;
+                                return Err(error.into());
+                            }
+                        }
                     }
                     Decision::Deny => (ToolOutput::new("denied by user"), ToolOutcome::Denied),
                 };
+                let display_output = output.model_text().to_owned();
                 self.emit(AgentEvent::ToolFinished {
                     id: call.id.clone(),
                     name: call.name,
                     outcome,
+                    output: display_output,
                 })
                 .await;
                 input.push(ModelInput::FunctionCallOutput {
@@ -265,6 +286,7 @@ pub enum AgentEvent {
         id: String,
         name: String,
         outcome: ToolOutcome,
+        output: String,
     },
     TurnFinished {
         assistant_text: String,
@@ -278,6 +300,7 @@ pub enum ToolOutcome {
     Completed,
     Denied,
     Cancelled,
+    Failed,
 }
 
 fn model_input_bytes(input: &[ModelInput]) -> usize {

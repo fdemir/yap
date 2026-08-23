@@ -9,7 +9,7 @@ use futures_util::{StreamExt, stream};
 use serde_json::{Value, json};
 use tempfile::tempdir;
 use yap::{
-    agent::{Agent, AgentEvent, ToolOutcome},
+    agent::{Agent, AgentError, AgentEvent, ToolOutcome},
     approval::{ApprovalBroker, ApprovalRequest, Decision, Risk},
     model::{
         FinishReason, Model, ModelError, ModelEvent, ModelInput, ModelRequest, ModelStream,
@@ -50,6 +50,23 @@ impl Tool for RecordingTool {
     async fn execute(&self, arguments: Value) -> Result<ToolOutput, ToolError> {
         self.calls.lock().unwrap().push(arguments);
         Ok(ToolOutput::new("fn main() {}"))
+    }
+}
+
+struct FailingTool;
+
+#[async_trait]
+impl Tool for FailingTool {
+    fn spec(&self) -> ToolSpec {
+        ToolSpec::new("fail", "Fail", json!({"type": "object"}))
+    }
+
+    fn risk(&self, _arguments: &Value) -> Risk {
+        Risk::ReadOnly
+    }
+
+    async fn execute(&self, _arguments: Value) -> Result<ToolOutput, ToolError> {
+        Err(ToolError::PatchMismatch)
     }
 }
 
@@ -140,6 +157,7 @@ async fn agent_executes_a_tool_and_continues_with_its_result() {
             id: "call_1".into(),
             name: "read_file".into(),
             outcome: ToolOutcome::Completed,
+            output: "fn main() {}".into(),
         })
     );
     let requests = requests.lock().unwrap();
@@ -170,6 +188,45 @@ async fn agent_executes_a_tool_and_continues_with_its_result() {
                 output: "fn main() {}".into(),
             },
         ]
+    );
+}
+
+#[tokio::test]
+async fn agent_emits_failed_tool_output_before_returning_the_error() {
+    let model = ScriptedModel {
+        responses: Mutex::new(VecDeque::from([vec![
+            Ok(ModelEvent::ToolCallStarted {
+                id: "call_1".into(),
+                name: "fail".into(),
+            }),
+            Ok(ModelEvent::ToolArgumentsDelta {
+                id: "call_1".into(),
+                delta: "{}".into(),
+            }),
+            Ok(ModelEvent::Finished(FinishReason::Completed)),
+        ]])),
+        requests: Arc::new(Mutex::new(Vec::new())),
+    };
+    let (event_tx, mut event_rx) = tokio::sync::mpsc::channel(8);
+    let mut agent = Agent::new(model, "model");
+    agent.set_event_sender(event_tx);
+    agent.register_tool(FailingTool);
+
+    let error = agent.run_turn("fail").await.unwrap_err();
+
+    assert!(matches!(error, AgentError::Tool(ToolError::PatchMismatch)));
+    assert!(matches!(
+        event_rx.recv().await,
+        Some(AgentEvent::ToolStarted { .. })
+    ));
+    assert_eq!(
+        event_rx.recv().await,
+        Some(AgentEvent::ToolFinished {
+            id: "call_1".into(),
+            name: "fail".into(),
+            outcome: ToolOutcome::Failed,
+            output: "patch text must match exactly once".into(),
+        })
     );
 }
 

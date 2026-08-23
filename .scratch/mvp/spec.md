@@ -126,6 +126,7 @@ Completed:
 - Central secret redaction for tool output, approvals, structured arguments, and displayed errors
 - Terminal-safe escaping for control, invisible, and bidirectional-override characters
 - Cursor-aware multiline editing, bounded paste, and bounded in-memory prompt history
+- Markdown transcript rendering with styled code blocks, diffs, lists, tables, and bounded tool-output previews
 - Wrap-aware transcript navigation with stable manual position and automatic tail following
 - Integration tests for provider streaming, agent behavior, tools, and workspace escapes
 - End-to-end fake-provider flow covering read -> automatic edit -> automatic command -> final response
@@ -134,7 +135,7 @@ Known gaps:
 
 - No CI pipeline
 - No session persistence or resume
-- No rich Markdown/diff rendering
+- No syntax-highlighted code rendering or expandable full tool-output view
 - No OS sandbox; shell external-path detection is best effort
 - Process identity tracking is Linux/macOS-specific; Windows uses `taskkill /T` and other Unix targets retain process-group cleanup
 - Secret detection is heuristic and cannot recognize every credential shape
@@ -157,7 +158,7 @@ CI automation is deferred for now; formatting, tests, and Clippy remain local re
 - [x] Add multiline editing, bounded paste, and prompt history navigation
 - [x] Improve transcript navigation
 - [x] Add global/project configuration and selectable provider profiles
-- [ ] Improve Markdown, diff, and tool-output rendering
+- [x] Improve Markdown, diff, and tool-output rendering
 - [ ] Add Git status and diff context
 - [ ] Surface model, step, token, and error details clearly
 

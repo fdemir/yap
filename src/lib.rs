@@ -3,6 +3,7 @@ pub mod app;
 pub mod approval;
 pub(crate) mod composer;
 pub mod config;
+pub(crate) mod markdown;
 pub mod model;
 pub(crate) mod process_tree;
 pub mod provider;

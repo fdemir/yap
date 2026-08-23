@@ -10,6 +10,7 @@ use unicode_width::UnicodeWidthStr;
 use crate::{
     agent::ToolOutcome,
     app::{App, Status, TranscriptEntry},
+    markdown::{render_markdown, render_tool_output},
     security::terminal_safe_text,
 };
 
@@ -50,11 +51,7 @@ fn render_transcript(frame: &mut Frame<'_>, area: Rect, app: &mut App) {
     }
     if !app.assistant_draft.is_empty() {
         push_message_gap(&mut lines);
-        lines.extend(
-            app.assistant_draft
-                .lines()
-                .map(|line| Line::raw(terminal_safe_text(line).into_owned())),
-        );
+        lines.extend(render_markdown(&app.assistant_draft));
     }
     if let Some(status) = active_status(app.status) {
         if app.assistant_draft.is_empty() {
@@ -150,24 +147,31 @@ fn push_entry_lines(lines: &mut Vec<Line<'static>>, entry: &TranscriptEntry, wid
             }
             lines.push(Line::styled(fit_background_line("", width), style));
         }
-        TranscriptEntry::Assistant(message) => {
-            lines.extend(
-                message
-                    .lines()
-                    .map(|line| Line::raw(terminal_safe_text(line).into_owned())),
-            );
-        }
-        TranscriptEntry::Tool { name, outcome, .. } => {
+        TranscriptEntry::Assistant(message) => lines.extend(render_markdown(message)),
+        TranscriptEntry::Tool {
+            name,
+            outcome,
+            output,
+            ..
+        } => {
             let (marker, foreground) = match outcome {
                 None => ("●", Color::Yellow),
                 Some(ToolOutcome::Completed) => ("✓", Color::Green),
-                Some(ToolOutcome::Denied) => ("×", Color::Red),
+                Some(ToolOutcome::Denied | ToolOutcome::Failed) => ("×", Color::Red),
                 Some(ToolOutcome::Cancelled) => ("×", Color::Yellow),
             };
             lines.push(Line::styled(
                 format!("{marker} {}", terminal_safe_text(name)),
                 Style::default().fg(foreground).add_modifier(Modifier::BOLD),
             ));
+            if let Some(output) = output
+                && !output.is_empty()
+            {
+                lines.extend(render_tool_output(
+                    output,
+                    *outcome == Some(ToolOutcome::Failed),
+                ));
+            }
         }
         TranscriptEntry::Error(message) => {
             lines.push(Line::styled(
@@ -328,6 +332,33 @@ mod tests {
     use ratatui::{Terminal, backend::TestBackend};
 
     use super::*;
+
+    #[test]
+    fn tool_entries_include_a_bounded_output_preview() {
+        let output = (0..30)
+            .map(|index| format!("line {index}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let mut lines = Vec::new();
+
+        push_entry_lines(
+            &mut lines,
+            &TranscriptEntry::Tool {
+                id: "call_1".into(),
+                name: "run_command".into(),
+                outcome: Some(ToolOutcome::Completed),
+                output: Some(output),
+            },
+            80,
+        );
+
+        assert_eq!(lines.len(), 15);
+        assert!(lines.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|span| span.content.contains("lines omitted"))
+        }));
+    }
 
     #[test]
     fn transcript_lines_are_wrapped_into_visual_rows() {

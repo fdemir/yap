@@ -34,6 +34,10 @@ impl ToolOutput {
         }
     }
 
+    pub fn model_text(&self) -> &str {
+        &self.model_text
+    }
+
     pub fn into_model_text(self) -> String {
         self.model_text
     }

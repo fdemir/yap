@@ -46,11 +46,7 @@ impl App {
     pub fn reduce(&mut self, event: AgentEvent) {
         match event {
             AgentEvent::AssistantDelta(delta) => {
-                if !checked_append(
-                    &mut self.assistant_draft,
-                    &delta,
-                    MAX_ASSISTANT_DRAFT_BYTES,
-                ) {
+                if !checked_append(&mut self.assistant_draft, &delta, MAX_ASSISTANT_DRAFT_BYTES) {
                     let combined = format!("{}{delta}", self.assistant_draft);
                     self.assistant_draft = truncate_text(
                         Cow::Owned(combined),
@@ -65,12 +61,14 @@ impl App {
                     id,
                     name,
                     outcome: None,
+                    output: None,
                 });
             }
             AgentEvent::ToolFinished {
                 id,
                 name,
                 outcome,
+                output,
             } => {
                 if let Some(entry) = self.transcript.iter_mut().rev().find(|entry| {
                     matches!(entry, TranscriptEntry::Tool { id: entry_id, .. } if entry_id == &id)
@@ -80,12 +78,14 @@ impl App {
                         id,
                         name,
                         outcome: Some(outcome),
+                        output: Some(output),
                     };
                     self.transcript_bytes = self
                         .transcript_bytes
                         .saturating_sub(old_bytes)
                         .saturating_add(entry.retained_bytes());
                 }
+                self.trim_transcript();
             }
             AgentEvent::TurnFinished { .. } => {
                 self.commit_assistant_draft();
@@ -246,9 +246,14 @@ impl App {
     }
 
     fn push_transcript(&mut self, entry: TranscriptEntry) {
-        let entry_bytes = entry.retained_bytes();
-        while self.transcript.len() >= MAX_TRANSCRIPT_ENTRIES
-            || self.transcript_bytes.saturating_add(entry_bytes) > MAX_TRANSCRIPT_BYTES
+        self.transcript_bytes = self.transcript_bytes.saturating_add(entry.retained_bytes());
+        self.transcript.push_back(entry);
+        self.trim_transcript();
+    }
+
+    fn trim_transcript(&mut self) {
+        while self.transcript.len() > MAX_TRANSCRIPT_ENTRIES
+            || self.transcript_bytes > MAX_TRANSCRIPT_BYTES
         {
             let Some(removed) = self.transcript.pop_front() else {
                 break;
@@ -257,8 +262,6 @@ impl App {
                 .transcript_bytes
                 .saturating_sub(removed.retained_bytes());
         }
-        self.transcript_bytes = self.transcript_bytes.saturating_add(entry_bytes);
-        self.transcript.push_back(entry);
     }
 }
 
@@ -358,6 +361,7 @@ pub(crate) enum TranscriptEntry {
         id: String,
         name: String,
         outcome: Option<ToolOutcome>,
+        output: Option<String>,
     },
     Error(String),
 }
@@ -366,7 +370,12 @@ impl TranscriptEntry {
     fn retained_bytes(&self) -> usize {
         match self {
             Self::User(message) | Self::Assistant(message) | Self::Error(message) => message.len(),
-            Self::Tool { id, name, .. } => id.len().saturating_add(name.len()),
+            Self::Tool {
+                id, name, output, ..
+            } => id
+                .len()
+                .saturating_add(name.len())
+                .saturating_add(output.as_ref().map_or(0, String::len)),
         }
     }
 }
