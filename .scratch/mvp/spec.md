@@ -20,10 +20,10 @@ Build a small native coding agent in Rust with a fullscreen Ratatui interface. U
 
 ## Provider
 
-- OpenAI Responses API
-- Model configurable; initial default: `gpt-5.3-codex`
-- Authentication: `OPENAI_API_KEY` environment variable
-- Optional endpoint override: `OPENAI_BASE_URL`
+- OpenAI Responses and OpenAI Chat-compatible protocols
+- Models selected as `provider/model`; default: `openai/gpt-5.3-codex`
+- Global and project JSONC configuration with environment-only credentials
+- Custom profiles for compatible endpoints such as OpenRouter, Ollama, and LM Studio
 - ChatGPT/Codex OAuth is out of scope for the MVP
 - Transport frames are normalized into provider-independent model events
 
@@ -68,7 +68,7 @@ CLI/TUI -> Agent -> Model
 ```
 
 - `Agent::run_turn`: public behavior seam for the sequential model/tool loop
-- `Model::stream`: provider seam; implemented by OpenAI Responses and a scripted fake
+- `Model::stream`: provider seam; implemented by OpenAI Responses, OpenAI Chat, and a scripted fake
 - `Tool::execute`: typed tool seam behind decode, validation, policy, and execution
 - `ApprovalBroker::decide`: human-authority seam; implemented by Ratatui and a scripted fake
 - Ratatui consumes `AgentEvent`; the agent never renders
@@ -79,8 +79,8 @@ Persistence is deferred, so no `SessionStore` seam exists in the MVP.
 
 ### Protocol spike
 
-- A CLI call streams one Codex response through the OpenAI Responses API.
-- Fragmented SSE events are parsed correctly.
+- A CLI call streams one response through the selected configured provider.
+- Fragmented Responses and Chat SSE events are parsed correctly.
 - Provider errors, malformed events, cancellation, and incomplete streams produce typed failures.
 - Protocol behavior is testable with recorded fixtures and no live API call.
 
@@ -95,7 +95,7 @@ Persistence is deferred, so no `SessionStore` seam exists in the MVP.
 
 ## Non-goals
 
-- Multiple providers
+- Native non-OpenAI-compatible providers
 - ChatGPT OAuth
 - Sessions/resume
 - Parallel or background tools
@@ -109,7 +109,8 @@ Persistence is deferred, so no `SessionStore` seam exists in the MVP.
 
 Completed:
 
-- OpenAI Responses streaming and normalized model events
+- OpenAI Responses and OpenAI Chat-compatible streaming with normalized model events
+- Layered JSONC configuration, provider profiles, per-model options, and environment-only credentials
 - Sequential model/tool loop with bounded steps
 - Fullscreen Ratatui transcript, multiline composer, approval flow, and active-turn cancellation
 - Workspace-scoped `list_files` and `read_file`
@@ -155,20 +156,20 @@ CI automation is deferred for now; formatting, tests, and Clippy remain local re
 
 - [x] Add multiline editing, bounded paste, and prompt history navigation
 - [x] Improve transcript navigation
+- [x] Add global/project configuration and selectable provider profiles
 - [ ] Improve Markdown, diff, and tool-output rendering
 - [ ] Add Git status and diff context
 - [ ] Surface model, step, token, and error details clearly
 
-### 3. Add persistence and configuration
+### 3. Add persistence
 
 - Store semantic session events as private JSONL
 - Resume sessions by validated ID and workspace
-- Add validated global and per-project configuration
 - Keep credentials environment-only
 
 ### 4. Add extensibility
 
-- Add a second provider to validate the model seam
+- Add a native non-OpenAI-compatible provider to further validate the model seam
 - Support custom tools and configurable prompts
 - Evaluate skills and MCP after the core remains reliable
 

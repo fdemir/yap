@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://raw.githubusercontent.com/fdemir/yap/main/schema/config.schema.json",
+  "title": "Yap configuration",
+  "type": "object",
+  "additionalProperties": false,
+  "properties": {
+    "$schema": {
+      "type": "string"
+    },
+    "version": {
+      "const": 1
+    },
+    "model": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9_-]+/.+$",
+      "maxLength": 513
+    },
+    "provider": {
+      "type": "object",
+      "maxProperties": 32,
+      "propertyNames": {
+        "pattern": "^[A-Za-z0-9_-]+$",
+        "maxLength": 256
+      },
+      "additionalProperties": {
+        "$ref": "#/$defs/provider"
+      }
+    }
+  },
+  "$defs": {
+    "provider": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "protocol": {
+          "enum": ["openai-responses", "openai-chat"]
+        },
+        "options": {
+          "$ref": "#/$defs/providerOptions"
+        },
+        "models": {
+          "type": "object",
+          "propertyNames": {
+            "minLength": 1,
+            "maxLength": 256
+          },
+          "additionalProperties": {
+            "$ref": "#/$defs/model"
+          }
+        }
+      }
+    },
+    "providerOptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "baseURL": {
+          "type": "string",
+          "format": "uri"
+        },
+        "apiKeyEnv": {
+          "type": "string",
+          "pattern": "^[A-Za-z_][A-Za-z0-9_]*$",
+          "maxLength": 256
+        },
+        "headers": {
+          "type": "object",
+          "maxProperties": 32,
+          "additionalProperties": {
+            "type": "string",
+            "maxLength": 8192
+          }
+        },
+        "timeoutMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 600000
+        },
+        "streamIdleTimeoutMs": {
+          "type": "integer",
+          "minimum": 1000,
+          "maximum": 600000
+        }
+      }
+    },
+    "model": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "name": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "options": {
+          "$ref": "#/$defs/modelOptions"
+        }
+      }
+    },
+    "modelOptions": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "reasoningEffort": {
+          "enum": ["none", "minimal", "low", "medium", "high", "xhigh"]
+        },
+        "textVerbosity": {
+          "enum": ["low", "medium", "high"]
+        },
+        "temperature": {
+          "type": "number",
+          "minimum": 0,
+          "maximum": 2
+        },
+        "maxOutputTokens": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 4294967295
+        }
+      }
+    }
+  }
+}

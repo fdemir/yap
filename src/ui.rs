@@ -298,7 +298,7 @@ fn render_footer(frame: &mut Frame<'_>, area: Rect, app: &App, model: &str, work
         columns[0],
     );
     frame.render_widget(
-        Paragraph::new(format!("(openai) {}", terminal_safe_text(model)))
+        Paragraph::new(terminal_safe_text(model).into_owned())
             .alignment(Alignment::Right)
             .style(Style::default().fg(MUTED)),
         columns[1],

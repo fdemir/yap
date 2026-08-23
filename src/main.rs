@@ -1,4 +1,4 @@
-use std::{env, io, process::ExitCode};
+use std::{io, process::ExitCode};
 
 use crossterm::event::{Event, EventStream, KeyCode, KeyEventKind, KeyModifiers};
 use futures_util::StreamExt;
@@ -8,13 +8,11 @@ use yap::{
     agent::{Agent, AgentError, AgentEvent},
     app::App,
     approval::{ChannelApprovalBroker, Decision},
-    model::OpenAiModel,
+    config::Configuration,
+    provider::ProviderSystem,
     terminal::TerminalSession,
     tools::{ApplyPatchTool, ListFilesTool, ReadFileTool, RunCommandTool},
 };
-
-const DEFAULT_MODEL: &str = "gpt-5.3-codex";
-const DEFAULT_BASE_URL: &str = "https://api.openai.com/v1";
 
 struct TurnRequest {
     prompt: String,
@@ -33,14 +31,15 @@ async fn main() -> ExitCode {
 }
 
 async fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let api_key = env::var("OPENAI_API_KEY").map_err(|_| "OPENAI_API_KEY must be set")?;
-    let base_url = env::var("OPENAI_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.into());
-    let endpoint = format!("{}/responses", base_url.trim_end_matches('/'));
-    let model_name = env::var("OPENAI_MODEL").unwrap_or_else(|_| DEFAULT_MODEL.into());
-    let workspace = std::fs::canonicalize(env::current_dir()?)?;
+    let workspace = std::fs::canonicalize(std::env::current_dir()?)?;
+    let config = Configuration::load(&workspace)?;
+    let providers = ProviderSystem::new(config);
+    let selected = providers.select(providers.selected_model())?;
+    let model_reference = selected.reference().clone();
+    let model_name = model_reference.model().to_owned();
+    let model = selected.into_model();
 
-    let model = OpenAiModel::new(endpoint, api_key);
-    let mut agent = Agent::new(model, model_name.clone());
+    let mut agent = Agent::new(model, model_name);
     agent.register_tool(ListFilesTool::new(&workspace)?);
     agent.register_tool(ReadFileTool::new(&workspace)?);
     agent.register_tool(ApplyPatchTool::new(&workspace)?);
@@ -76,7 +75,7 @@ async fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut terminal = TerminalSession::start()?;
     let result = run_tui(
         terminal.terminal_mut(),
-        &model_name,
+        &model_reference.to_string(),
         &workspace_label,
         prompt_tx,
         &mut event_rx,

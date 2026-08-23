@@ -1,13 +1,21 @@
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    time::Duration,
+};
 
 use async_stream::try_stream;
 use futures_util::{StreamExt, stream::BoxStream};
+use reqwest::header::HeaderMap;
 use secrecy::{ExposeSecret, SecretString};
 use serde_json::{Value, json};
 use thiserror::Error;
 use tokio_util::sync::CancellationToken;
 
 use crate::security::bounded_redacted;
+
+mod openai_chat;
+
+pub use openai_chat::OpenAiChatModel;
 
 pub type ModelStream<'a> = BoxStream<'a, Result<ModelEvent, ModelError>>;
 
@@ -37,6 +45,15 @@ enum NormalizedResponseEvent {
 
 pub trait Model: Send + Sync {
     fn stream(&self, request: ModelRequest) -> ModelStream<'_>;
+}
+
+impl<T> Model for Box<T>
+where
+    T: Model + ?Sized,
+{
+    fn stream(&self, request: ModelRequest) -> ModelStream<'_> {
+        (**self).stream(request)
+    }
 }
 
 #[derive(Debug, Clone)]
@@ -119,6 +136,17 @@ impl ToolSpec {
             "parameters": self.input_schema,
         })
     }
+
+    fn to_openai_chat_json(&self) -> Value {
+        json!({
+            "type": "function",
+            "function": {
+                "name": self.name,
+                "description": self.description,
+                "parameters": self.input_schema,
+            }
+        })
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -196,16 +224,51 @@ pub enum ModelError {
 pub struct OpenAiModel {
     client: reqwest::Client,
     endpoint: String,
-    api_key: SecretString,
+    api_key: Option<SecretString>,
+    options: OpenAiModelOptions,
+    stream_idle_timeout: Option<Duration>,
+}
+
+#[derive(Clone, Default)]
+pub(crate) struct OpenAiModelOptions {
+    pub(crate) reasoning_effort: Option<&'static str>,
+    pub(crate) text_verbosity: Option<&'static str>,
+    pub(crate) temperature: Option<f64>,
+    pub(crate) max_output_tokens: Option<u32>,
 }
 
 impl OpenAiModel {
     pub fn new(endpoint: impl Into<String>, api_key: impl Into<String>) -> Self {
-        Self {
-            client: reqwest::Client::new(),
-            endpoint: endpoint.into(),
-            api_key: SecretString::from(api_key.into()),
+        Self::configured(
+            endpoint.into(),
+            Some(api_key.into()),
+            HeaderMap::new(),
+            OpenAiModelOptions::default(),
+            None,
+            None,
+        )
+        .expect("default OpenAI client configuration should be valid")
+    }
+
+    pub(crate) fn configured(
+        endpoint: String,
+        api_key: Option<String>,
+        headers: HeaderMap,
+        options: OpenAiModelOptions,
+        timeout: Option<Duration>,
+        stream_idle_timeout: Option<Duration>,
+    ) -> Result<Self, reqwest::Error> {
+        let mut client = reqwest::Client::builder().default_headers(headers);
+        if let Some(timeout) = timeout {
+            client = client.timeout(timeout);
         }
+        Ok(Self {
+            client: client.build()?,
+            endpoint,
+            api_key: api_key.map(SecretString::from),
+            options,
+            stream_idle_timeout,
+        })
     }
 }
 
@@ -503,12 +566,23 @@ impl Model for OpenAiModel {
             if let Some(system_prompt) = request.system_prompt {
                 body["instructions"] = Value::String(system_prompt);
             }
-            let send = self
-                .client
-                .post(&self.endpoint)
-                .bearer_auth(self.api_key.expose_secret())
-                .json(&body)
-                .send();
+            if let Some(effort) = self.options.reasoning_effort {
+                body["reasoning"] = json!({ "effort": effort });
+            }
+            if let Some(verbosity) = self.options.text_verbosity {
+                body["text"] = json!({ "verbosity": verbosity });
+            }
+            if let Some(temperature) = self.options.temperature {
+                body["temperature"] = json!(temperature);
+            }
+            if let Some(max_output_tokens) = self.options.max_output_tokens {
+                body["max_output_tokens"] = json!(max_output_tokens);
+            }
+            let mut request_builder = self.client.post(&self.endpoint);
+            if let Some(api_key) = &self.api_key {
+                request_builder = request_builder.bearer_auth(api_key.expose_secret());
+            }
+            let send = request_builder.json(&body).send();
             let response = tokio::select! {
                 _ = cancellation.cancelled() => Err(ModelError::Cancelled),
                 response = send => response
@@ -522,9 +596,17 @@ impl Model for OpenAiModel {
             let mut state = ResponseStreamState::default();
             let mut completed = false;
             'stream: loop {
+                let next_chunk = async {
+                    match self.stream_idle_timeout {
+                        Some(timeout) => tokio::time::timeout(timeout, source.next())
+                            .await
+                            .map_err(|_| ModelError::Transport("model stream idle timeout".into())),
+                        None => Ok(source.next().await),
+                    }
+                };
                 let chunk = tokio::select! {
                     _ = cancellation.cancelled() => Err(ModelError::Cancelled),
-                    chunk = source.next() => Ok(chunk),
+                    chunk = next_chunk => chunk,
                 }?;
                 let Some(chunk) = chunk else { break };
                 let chunk = chunk.map_err(|error| ModelError::Transport(error.to_string()))?;
