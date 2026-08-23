@@ -121,7 +121,7 @@ async fn run_tui(
     tokio::pin!(shutdown);
 
     loop {
-        terminal.draw(|frame| yap::ui::render(frame, &app, model, workspace))?;
+        terminal.draw(|frame| yap::ui::render(frame, &mut app, model, workspace))?;
         tokio::select! {
             signal = &mut shutdown => {
                 signal?;
@@ -136,6 +136,9 @@ async fn run_tui(
                         if !handle_key(&mut app, key, &prompt_tx, &mut active_cancellation).await {
                             return Ok(());
                         }
+                    }
+                    Some(Ok(Event::Paste(text))) if !app.has_pending_approval() => {
+                        app.insert_text(&text);
                     }
                     Some(Ok(_)) => {}
                     Some(Err(error)) => return Err(error),
@@ -170,7 +173,13 @@ async fn handle_key(
 
     if app.has_pending_approval() {
         match key.code {
-            KeyCode::Enter => app.decide(Decision::Allow),
+            KeyCode::Enter
+                if !key
+                    .modifiers
+                    .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
+            {
+                app.decide(Decision::Allow);
+            }
             KeyCode::Char('d') => app.decide(Decision::Deny),
             KeyCode::Esc => cancel_active_turn(app, active_cancellation),
             _ => {}
@@ -181,6 +190,13 @@ async fn handle_key(
     match key.code {
         KeyCode::Esc if app.status() == yap::app::Status::Working => {
             cancel_active_turn(app, active_cancellation);
+        }
+        KeyCode::Enter
+            if key
+                .modifiers
+                .intersects(KeyModifiers::SHIFT | KeyModifiers::ALT) =>
+        {
+            app.insert_newline();
         }
         KeyCode::Enter
             if matches!(
@@ -199,7 +215,30 @@ async fn handle_key(
                     .await;
             }
         }
+        KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.previous_prompt();
+        }
+        KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.next_prompt();
+        }
+        KeyCode::Char('a') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.move_cursor_home();
+        }
+        KeyCode::Char('e') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+            app.move_cursor_end();
+        }
         KeyCode::Backspace => app.pop_input(),
+        KeyCode::Delete => app.delete_input(),
+        KeyCode::Left => app.move_cursor_left(),
+        KeyCode::Right => app.move_cursor_right(),
+        KeyCode::Home if key.modifiers.contains(KeyModifiers::CONTROL) => app.scroll_to_top(),
+        KeyCode::End if key.modifiers.contains(KeyModifiers::CONTROL) => app.scroll_to_bottom(),
+        KeyCode::Home => app.move_cursor_home(),
+        KeyCode::End => app.move_cursor_end(),
+        KeyCode::Up => app.move_cursor_up(),
+        KeyCode::Down => app.move_cursor_down(),
+        KeyCode::PageUp => app.scroll_page_up(),
+        KeyCode::PageDown => app.scroll_page_down(),
         KeyCode::Char(character)
             if !key
                 .modifiers
@@ -207,8 +246,6 @@ async fn handle_key(
         {
             app.push_input(character);
         }
-        KeyCode::Up => app.scroll_up(),
-        KeyCode::Down => app.scroll_down(),
         _ => {}
     }
     true
@@ -237,5 +274,32 @@ fn cancel_active_turn(app: &mut App, active_cancellation: &mut Option<Cancellati
     app.cancel_active_turn();
     if let Some(cancellation) = active_cancellation {
         cancellation.cancel();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crossterm::event::KeyEvent;
+
+    use super::*;
+
+    #[tokio::test]
+    async fn modified_enter_inserts_a_newline_and_plain_enter_submits() {
+        let mut app = App::new();
+        let (prompt_tx, mut prompt_rx) = mpsc::channel(1);
+        let mut cancellation = None;
+
+        for key in [
+            KeyEvent::new(KeyCode::Char('a'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT),
+            KeyEvent::new(KeyCode::Char('b'), KeyModifiers::NONE),
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+        ] {
+            assert!(handle_key(&mut app, key, &prompt_tx, &mut cancellation).await);
+        }
+
+        let request = prompt_rx.recv().await.expect("prompt should be submitted");
+        assert_eq!(request.prompt, "a\nb");
+        assert!(cancellation.is_some());
     }
 }

@@ -1,4 +1,9 @@
-use std::io;
+use std::io::{self, stdout};
+
+use crossterm::{
+    event::{DisableBracketedPaste, EnableBracketedPaste},
+    execute,
+};
 
 pub struct TerminalSession {
     terminal: ratatui::DefaultTerminal,
@@ -8,9 +13,11 @@ pub struct TerminalSession {
 impl TerminalSession {
     pub fn start() -> io::Result<Self> {
         let terminal = ratatui::try_init()?;
+        let restore = RestoreGuard::new(restore_terminal as fn());
+        execute!(stdout(), EnableBracketedPaste)?;
         Ok(Self {
             terminal,
-            _restore: RestoreGuard::new(restore_terminal),
+            _restore: restore,
         })
     }
 
@@ -24,6 +31,7 @@ impl TerminalSession {
 }
 
 fn restore_terminal() {
+    let _ = execute!(stdout(), DisableBracketedPaste);
     ratatui::restore();
 }
 

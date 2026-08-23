@@ -1,6 +1,7 @@
 pub mod agent;
 pub mod app;
 pub mod approval;
+pub(crate) mod composer;
 pub mod model;
 pub(crate) mod process_tree;
 pub(crate) mod security;

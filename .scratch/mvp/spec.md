@@ -1,6 +1,6 @@
 # yap MVP
 
-Status: first vertical slice implemented; hardening next
+Status: Stage 1 hardening complete; daily usability in progress
 
 ## Goal
 
@@ -32,9 +32,9 @@ Build a small native coding agent in Rust with a fullscreen Ratatui interface. U
 ### Interface
 
 - Fullscreen Ratatui transcript
-- Single prompt composer
+- Multiline prompt composer with cursor movement and in-memory history
 - Streaming assistant text and tool status
-- Scrollback
+- Wrap-aware scrollback with automatic tail following and manual navigation
 - Approval modal
 - Cancellation
 - Visible errors and step usage
@@ -111,7 +111,7 @@ Completed:
 
 - OpenAI Responses streaming and normalized model events
 - Sequential model/tool loop with bounded steps
-- Fullscreen Ratatui transcript, composer, approval flow, and active-turn cancellation
+- Fullscreen Ratatui transcript, multiline composer, approval flow, and active-turn cancellation
 - Workspace-scoped `list_files` and `read_file`
 - Automatic workspace-scoped `apply_patch` with exact-match validation
 - Automatic workspace `run_command` with external-path approval, timeout, and bounded output
@@ -124,6 +124,8 @@ Completed:
 - Explicit prompt, stream, argument, output, patch, listing, transcript, and error limits
 - Central secret redaction for tool output, approvals, structured arguments, and displayed errors
 - Terminal-safe escaping for control, invisible, and bidirectional-override characters
+- Cursor-aware multiline editing, bounded paste, and bounded in-memory prompt history
+- Wrap-aware transcript navigation with stable manual position and automatic tail following
 - Integration tests for provider streaming, agent behavior, tools, and workspace escapes
 - End-to-end fake-provider flow covering read -> automatic edit -> automatic command -> final response
 
@@ -131,7 +133,7 @@ Known gaps:
 
 - No CI pipeline
 - No session persistence or resume
-- No multiline composer or rich Markdown/diff rendering
+- No rich Markdown/diff rendering
 - No OS sandbox; shell external-path detection is best effort
 - Process identity tracking is Linux/macOS-specific; Windows uses `taskkill /T` and other Unix targets retain process-group cleanup
 - Secret detection is heuristic and cannot recognize every credential shape
@@ -151,10 +153,11 @@ CI automation is deferred for now; formatting, tests, and Clippy remain local re
 
 ### 2. Improve daily usability
 
-- Add multiline editing and better transcript navigation
-- Improve Markdown, diff, and tool-output rendering
-- Add Git status and diff context
-- Surface model, step, token, and error details clearly
+- [x] Add multiline editing, bounded paste, and prompt history navigation
+- [x] Improve transcript navigation
+- [ ] Improve Markdown, diff, and tool-output rendering
+- [ ] Add Git status and diff context
+- [ ] Surface model, step, token, and error details clearly
 
 ### 3. Add persistence and configuration
 
