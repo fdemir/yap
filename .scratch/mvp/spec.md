@@ -116,6 +116,14 @@ Completed:
 - Automatic workspace-scoped `apply_patch` with exact-match validation
 - Automatic workspace `run_command` with external-path approval, timeout, and bounded output
 - Approval for sensitive `.env` reads and repeated identical tool calls
+- Strict bounded SSE framing with sequence and tool-lifecycle validation
+- Identity-checked process-tree cleanup across escaped sessions/process groups on Linux and macOS
+- TERM grace followed by forced cleanup on cancellation, timeout, and output floods
+- Early RAII terminal restoration with panic and TERM/HUP/Ctrl+C shutdown coverage
+- Capability-rooted, final-component-no-follow file access and atomic, stale-content-checked patch replacement
+- Explicit prompt, stream, argument, output, patch, listing, transcript, and error limits
+- Central secret redaction for tool output, approvals, structured arguments, and displayed errors
+- Terminal-safe escaping for control, invisible, and bidirectional-override characters
 - Integration tests for provider streaming, agent behavior, tools, and workspace escapes
 - End-to-end fake-provider flow covering read -> automatic edit -> automatic command -> final response
 
@@ -124,9 +132,10 @@ Known gaps:
 - No CI pipeline
 - No session persistence or resume
 - No multiline composer or rich Markdown/diff rendering
-- Cancellation and descendant-process cleanup need more adversarial testing
-- Filesystem checks are canonical-path based, not capability based
 - No OS sandbox; shell external-path detection is best effort
+- Process identity tracking is Linux/macOS-specific; Windows uses `taskkill /T` and other Unix targets retain process-group cleanup
+- Secret detection is heuristic and cannot recognize every credential shape
+- Atomic replacement still has an unavoidable final namespace race
 
 ## Roadmap
 
@@ -134,9 +143,9 @@ Known gaps:
 
 - [x] Add an end-to-end test using a fake provider
 - [x] Cancel active model streams, pending approvals, and running commands without exiting
-- [ ] Expand malformed stream, terminal restoration, and descendant-process cleanup tests
-- [ ] Move file access to capability-rooted operations and test filesystem races
-- [ ] Add redaction and explicit bounds for every retained buffer
+- [x] Expand malformed stream, terminal restoration, and descendant-process cleanup tests
+- [x] Move file access to capability-rooted operations and test filesystem races
+- [x] Add redaction and explicit bounds for every retained buffer
 
 CI automation is deferred for now; formatting, tests, and Clippy remain local release checks.
 
@@ -166,4 +175,4 @@ CI automation is deferred for now; formatting, tests, and Clippy remain local re
 - Add a changelog, security policy, and contribution guide
 - Document platform support and sandbox guarantees precisely
 
-The immediate priority is Stage 1. New feature breadth waits until the current vertical slice is reliable.
+Stage 1 is complete. The immediate priority is Stage 2 daily usability.

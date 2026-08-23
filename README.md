@@ -19,7 +19,7 @@ Optional: `OPENAI_MODEL` and `OPENAI_BASE_URL`.
 - `↑` / `↓`: scroll
 - `Ctrl+C`: exit
 
-> Shell commands run with your user permissions, and most workspace commands do not require approval. There is no OS sandbox.
+> File tools are workspace-confined. Shell commands run with your user permissions, and most workspace commands do not require approval. There is no OS sandbox.
 
 ## Development
 
